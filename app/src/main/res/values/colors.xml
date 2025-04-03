@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#1976D2</color>
+    <color name="primary_dark">#1565C0</color>
+    <color name="primary_light">#42A5F5</color>
+    <color name="accent">#FF4081</color>
+    <color name="teacher_mode">#2E7D32</color>
+    <color name="student_mode">#C62828</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+    <color name="bluetooth_enabled">#4CAF50</color>
+    <color name="bluetooth_disabled">#F44336</color>
+    <color name="success_background">#E8F5E9</color>
+    <color name="error_background">#FFEBEE</color>
+    <color name="header_background">#2196F3</color>
+    <color name="header_text">#FFFFFF</color>
+    <color name="row_even">#FFFFFF</color>
+    <color name="row_odd">#F5F5F5</color>
+    <color name="text_color">#212121</color>
+</resources>
