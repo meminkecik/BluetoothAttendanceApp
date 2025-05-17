@@ -15,16 +15,29 @@ interface AttendanceDao {
     @Query("SELECT * FROM attendance_records WHERE courseId = :courseId ORDER BY timestamp DESC")
     fun getAttendanceForCourse(courseId: Int): Flow<List<AttendanceRecord>>
 
+    @Query("SELECT * FROM attendance_records ORDER BY timestamp DESC")
+    fun getAllAttendanceRecords(): Flow<List<AttendanceRecord>>
+
     @Query("""
         SELECT * FROM attendance_records 
-        WHERE date(timestamp/1000, 'unixepoch') = date(:date/1000, 'unixepoch')
+        WHERE datetime(timestamp/1000, 'unixepoch', 'localtime') >= datetime(:date/1000, 'unixepoch', 'localtime', '-1 day')
         ORDER BY timestamp DESC
     """)
     fun getAttendanceByDate(date: Date): Flow<List<AttendanceRecord>>
 
-    @Query("SELECT * FROM attendance_records WHERE studentId = :studentId ORDER BY timestamp DESC")
-    fun getAttendanceForStudent(studentId: String): Flow<List<AttendanceRecord>>
+    @Query("SELECT * FROM attendance_records WHERE deviceAddress = :deviceAddress ORDER BY timestamp DESC")
+    fun getAttendanceForStudent(deviceAddress: String): Flow<List<AttendanceRecord>>
 
     @Query("DELETE FROM attendance_records WHERE courseId = :courseId")
     suspend fun deleteAttendanceForCourse(courseId: Int)
+
+    @Query("""
+        SELECT EXISTS (
+            SELECT 1 FROM attendance_records 
+            WHERE courseId = :courseId 
+            AND deviceAddress = :deviceAddress
+            AND datetime(timestamp/1000, 'unixepoch', 'localtime') >= datetime('now', 'localtime', '-1 day')
+        )
+    """)
+    suspend fun hasExistingAttendance(courseId: Int, deviceAddress: String): Boolean
 } 

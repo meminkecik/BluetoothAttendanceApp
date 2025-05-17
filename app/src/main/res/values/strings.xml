@@ -5,13 +5,13 @@
     <string name="stop_attendance">Yoklamayı Durdur</string>
     <string name="show_records">Yoklama Kayıtları</string>
     <string name="bluetooth_on">Bluetooth Açık</string>
-    <string name="bluetooth_off">Bluetooth Kapalı</string>
+    <string name="bluetooth_off">Bluetooth\'u Aç</string>
     <string name="teacher_mode">Öğretmen Modu</string>
     <string name="student_mode">Öğrenci Modu</string>
     <string name="login">Giriş Yap</string>
-    <string name="bluetooth_permission_required">Bluetooth izni gerekli</string>
+    <string name="bluetooth_permission_required">Bluetooth İzni Gerekli</string>
     <string name="bluetooth_turning_off">Bluetooth kapatılıyor</string>
-    <string name="bluetooth_permission_denied">Bluetooth açma izni reddedildi</string>
+    <string name="bluetooth_permission_denied">Bluetooth izni reddedildi</string>
     <string name="all_permissions_granted">Tüm izinler verildi</string>
     <string name="all_permissions_already_granted">Tüm izinler zaten verilmiş</string>
     <string name="student_id_format">Öğrenci ID: %s</string>
@@ -47,4 +47,7 @@
     <string name="attendance_records">Yoklama Kayıtları</string>
     <string name="student_login">Öğrenci Girişi</string>
     <string name="broadcast_failed">Yoklama gönderilemedi</string>
+    <string name="broadcast_completed">Yoklama gönderimi tamamlandı</string>
+    <string name="status_idle">Hazır</string>
+    <string name="course_name_hint">Ders Adı</string>
 </resources>

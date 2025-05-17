@@ -9,15 +9,17 @@ import androidx.room.TypeConverters
 @Database(
     entities = [
         Course::class,
-        AttendanceRecord::class
+        AttendanceRecord::class,
+        UserEntity::class
     ],
-    version = 2,
+    version = 5,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
 abstract class AttendanceDatabase : RoomDatabase() {
     abstract fun courseDao(): CourseDao
     abstract fun attendanceDao(): AttendanceDao
+    abstract fun userDao(): UserDao
 
     companion object {
         @Volatile

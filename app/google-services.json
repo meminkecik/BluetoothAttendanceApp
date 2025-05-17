@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "790746729468",
+    "project_id": "bluetoothattandance",
+    "storage_bucket": "bluetoothattandance.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:790746729468:android:bf4a9c5bdc577397528079",
+        "android_client_info": {
+          "package_name": "com.example.bluetoothattendanceapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBz4nKWwK22QrxHmc62L-wfCHz1ff5y31M"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

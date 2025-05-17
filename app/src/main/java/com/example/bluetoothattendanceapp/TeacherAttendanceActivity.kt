@@ -1,22 +1,33 @@
 package com.example.bluetoothattendanceapp
 
+import android.Manifest
+import android.bluetooth.BluetoothAdapter
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.Gravity
 import android.view.Menu
 import android.view.MenuItem
+import android.view.View
 import android.widget.TableLayout
 import android.widget.TableRow
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.bluetoothattendanceapp.data.AttendanceDatabase
 import com.example.bluetoothattendanceapp.data.AttendanceRecord
 import com.example.bluetoothattendanceapp.data.Course
+import com.example.bluetoothattendanceapp.data.FirebaseAttendanceRecord
+import com.example.bluetoothattendanceapp.databinding.ActivityTeacherAttendanceBinding
+import com.example.bluetoothattendanceapp.utils.FirebaseManager
 import com.itextpdf.kernel.pdf.PdfWriter
 import com.opencsv.CSVWriter
 import kotlinx.coroutines.launch
@@ -24,13 +35,103 @@ import java.io.File
 import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.*
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import java.nio.charset.StandardCharsets
+import com.example.bluetoothattendanceapp.data.User
+import android.bluetooth.le.ScanSettings
 
 class TeacherAttendanceActivity : AppCompatActivity() {
+    private lateinit var binding: ActivityTeacherAttendanceBinding
     private lateinit var database: AttendanceDatabase
     private lateinit var tableLayout: TableLayout
     private lateinit var course: Course
     private lateinit var deviceAdapter: DeviceAdapter
     private var courseId: Int = -1
+    private lateinit var firebaseManager: FirebaseManager
+    private var sessionId: String? = null
+    private var isAttendanceActive = false
+    private lateinit var bluetoothAdapter: BluetoothAdapter
+
+    private val scanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            try {
+                val scanRecord = result.scanRecord
+                val manufacturerData = scanRecord?.getManufacturerSpecificData(0x0000)
+                
+                if (manufacturerData != null) {
+                    Log.d("Attendance", "Ham veri alındı: ${manufacturerData.contentToString()}")
+                    
+                    val attendanceData = String(manufacturerData, StandardCharsets.UTF_8)
+                    Log.d("Attendance", "Çözümlenen veri: $attendanceData")
+                    
+                    val parts = attendanceData.split("|")
+                    if (parts.size == 2) {
+                        val studentNumber = parts[0]
+                        val receivedCourseId = parts[1].toInt()
+                        
+                        Log.d("Attendance", "Öğrenci No: $studentNumber, Ders ID: $receivedCourseId")
+                        
+                        // Gelen ders ID'sini kontrol et
+                        if (receivedCourseId == courseId) {
+                            lifecycleScope.launch {
+                                try {
+                                    firebaseManager.getStudentByNumber(studentNumber)?.let { student: User ->
+                                        Log.d("Attendance", "Öğrenci bulundu: ${student.name} ${student.surname}")
+                                        
+                                        // Öğrencinin daha önce yoklamaya katılıp katılmadığını kontrol et
+                                        val hasExistingAttendance = database.attendanceDao()
+                                            .hasExistingAttendance(courseId, result.device.address)
+                                        
+                                        if (!hasExistingAttendance) {
+                                            val record = AttendanceRecord(
+                                                studentNumber = student.studentNumber,
+                                                studentName = student.name,
+                                                studentSurname = student.surname,
+                                                deviceAddress = result.device.address,
+                                                courseId = courseId,
+                                                timestamp = Date()
+                                            )
+                                            
+                                            addAttendanceRecord(record)
+                                            
+                                            runOnUiThread {
+                                                binding.txtStatus.text = "${student.name} ${student.surname} yoklamaya katıldı"
+                                                Toast.makeText(
+                                                    this@TeacherAttendanceActivity,
+                                                    "${student.name} ${student.surname} yoklamaya katıldı",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        } else {
+                                            Log.d("Attendance", "Öğrenci zaten yoklamaya katılmış")
+                                        }
+                                    } ?: run {
+                                        Log.e("Attendance", "Öğrenci bulunamadı: $studentNumber")
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e("Attendance", "Öğrenci bilgileri alınamadı: ${e.message}")
+                                }
+                            }
+                        } else {
+                            Log.d("Attendance", "Farklı ders ID'si: Beklenen=$courseId, Gelen=$receivedCourseId")
+                        }
+                    } else {
+                        Log.e("Attendance", "Geçersiz veri formatı: $attendanceData")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("Attendance", "Tarama sonucu işlenirken hata: ${e.message}")
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.e("Attendance", "Tarama hatası: $errorCode")
+            runOnUiThread {
+                binding.txtStatus.text = "Tarama hatası: $errorCode"
+            }
+        }
+    }
 
     companion object {
         const val EXTRA_COURSE_ID = "extra_course_id"
@@ -38,11 +139,15 @@ class TeacherAttendanceActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_teacher_attendance)
+        binding = ActivityTeacherAttendanceBinding.inflate(layoutInflater)
+        setContentView(binding.root)
 
+        setupUI()
         database = AttendanceDatabase.getDatabase(this)
-        tableLayout = findViewById(R.id.tableLayout)
+        tableLayout = binding.tableLayout
         deviceAdapter = DeviceAdapter()
+        firebaseManager = FirebaseManager()
+        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
 
         // Başlık satırını ekle
         addHeaderRow()
@@ -53,10 +158,30 @@ class TeacherAttendanceActivity : AppCompatActivity() {
             return
         }
 
+        // Course bilgisini yükle ve yoklamayı başlat
         lifecycleScope.launch {
-            course = database.courseDao().getCourseById(courseId)
-            title = "Yoklama - ${course.name}"
-            loadAttendanceRecords()
+            try {
+                course = database.courseDao().getCourseById(courseId)
+                title = "Yoklama - ${course.name}"
+                loadAttendanceRecords()
+                startAttendance() // Yoklamayı başlat
+                createAttendanceSession()
+            } catch (e: Exception) {
+                Log.e("TeacherAttendance", "Ders bilgisi yüklenemedi: ${e.message}")
+                Toast.makeText(this@TeacherAttendanceActivity, "Ders bilgisi yüklenemedi", Toast.LENGTH_SHORT).show()
+                finish()
+            }
+        }
+    }
+
+    private fun setupUI() {
+        binding.apply {
+            btnEndAttendance.setOnClickListener {
+                showEndAttendanceDialog()
+            }
+            
+            // Başlangıçta buton gizli
+            btnEndAttendance.visibility = View.GONE
         }
     }
 
@@ -277,15 +402,16 @@ class TeacherAttendanceActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        if (isAttendanceActive) {
+            stopAttendance()
+        }
         super.onDestroy()
-        lifecycleScope.launch {
-            try {
-                database.courseDao().updateCourseStatus(course.id, false)
-                Log.d("TeacherAttendance", "Ders kapatıldı: ${course.name} (ID: ${course.id})")
-                Toast.makeText(this@TeacherAttendanceActivity, "Yoklama sonlandırıldı", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Log.e("TeacherAttendance", "Ders kapatma hatası: ${e.message}")
-            }
+        // Aktivite kapanırken taramayı durdur
+        if (ActivityCompat.checkSelfPermission(
+            this,
+            Manifest.permission.BLUETOOTH_SCAN
+        ) == PackageManager.PERMISSION_GRANTED) {
+            bluetoothAdapter.bluetoothLeScanner?.stopScan(scanCallback)
         }
     }
 
@@ -341,6 +467,131 @@ class TeacherAttendanceActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 Log.e("Attendance", "Yoklama listesi yenilenemedi: ${e.message}")
             }
+        }
+    }
+
+    private fun createAttendanceSession() {
+        lifecycleScope.launch {
+            try {
+                val teacherId = firebaseManager.getCurrentUser()?.id ?: return@launch
+                firebaseManager.createAttendanceSession(
+                    teacherId = teacherId,
+                    courseName = course.name,
+                    courseId = course.id
+                ).onSuccess { id ->
+                    sessionId = id
+                    Log.d("TeacherAttendance", "Yoklama oturumu oluşturuldu: $id")
+                }.onFailure { exception ->
+                    Log.e("TeacherAttendance", "Yoklama oturumu oluşturulamadı: ${exception.message}")
+                    Toast.makeText(
+                        this@TeacherAttendanceActivity,
+                        "Yoklama oturumu oluşturulamadı: ${exception.message}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    finish()
+                }
+            } catch (e: Exception) {
+                Log.e("TeacherAttendance", "Yoklama oturumu oluşturma hatası: ${e.message}")
+                Toast.makeText(
+                    this@TeacherAttendanceActivity,
+                    "Yoklama oturumu oluşturma hatası: ${e.message}",
+                    Toast.LENGTH_SHORT
+                ).show()
+                finish()
+            }
+        }
+    }
+
+    // Öğrenci yoklama kaydı eklendiğinde Firebase'e de kaydet
+    private fun addAttendanceRecord(record: AttendanceRecord) {
+        lifecycleScope.launch {
+            sessionId?.let { id ->
+                // Room veritabanına kaydet
+                database.attendanceDao().insertAttendance(record)
+                
+                // Firebase'e kaydet
+                val firebaseRecord = FirebaseAttendanceRecord(
+                    studentId = record.deviceAddress, // veya başka bir unique ID
+                    studentName = record.studentName,
+                    studentSurname = record.studentSurname,
+                    studentNumber = record.studentNumber ?: "",
+                    timestamp = record.timestamp.time
+                )
+                
+                firebaseManager.addAttendanceRecord(id, firebaseRecord)
+                    .onFailure { exception ->
+                        Toast.makeText(
+                            this@TeacherAttendanceActivity,
+                            "Yoklama kaydedilemedi: ${exception.message}",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+            }
+        }
+    }
+
+    private fun startAttendance() {
+        isAttendanceActive = true
+        binding.btnEndAttendance.visibility = View.VISIBLE
+        
+        // Bluetooth taramasını başlat
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) {
+            val settings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .build()
+
+            bluetoothAdapter.bluetoothLeScanner?.startScan(null, settings, scanCallback)
+            Log.d("TeacherAttendance", "Yoklama taraması başlatıldı")
+        }
+    }
+
+    private fun stopAttendance() {
+        if (!isAttendanceActive) return
+
+        isAttendanceActive = false
+        binding.btnEndAttendance.visibility = View.GONE
+
+        // Bluetooth taramasını durdur
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) {
+            bluetoothAdapter.bluetoothLeScanner?.stopScan(scanCallback)
+            Log.d("TeacherAttendance", "Yoklama taraması durduruldu")
+        }
+
+        // Firebase'deki oturumu kapat
+        lifecycleScope.launch {
+            sessionId?.let { sid ->
+                try {
+                    firebaseManager.closeAttendanceSession(sid)
+                    Log.d("TeacherAttendance", "Firebase oturumu kapatıldı")
+                } catch (e: Exception) {
+                    Log.e("TeacherAttendance", "Oturum kapatma hatası: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun showEndAttendanceDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Yoklamayı Bitir")
+            .setMessage("Yoklamayı bitirmek istediğinizden emin misiniz?")
+            .setPositiveButton("Evet") { _, _ ->
+                stopAttendance()
+                finish()
+            }
+            .setNegativeButton("Hayır", null)
+            .show()
+    }
+
+    override fun onPause() {
+        // Aktivite arka plana alındığında yoklamayı durdurmuyoruz
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Aktivite tekrar ön plana geldiğinde, eğer yoklama hala aktifse devam et
+        if (isAttendanceActive) {
+            startAttendance()
         }
     }
 } 

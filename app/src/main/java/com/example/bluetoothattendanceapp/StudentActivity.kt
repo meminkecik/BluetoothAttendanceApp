@@ -13,10 +13,12 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -30,6 +32,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.example.bluetoothattendanceapp.utils.UuidUtils
 import com.google.android.material.button.MaterialButton
 import java.nio.charset.Charset
@@ -39,15 +42,20 @@ import androidx.recyclerview.widget.RecyclerView
 import com.example.bluetoothattendanceapp.adapter.CourseAdapter
 import com.example.bluetoothattendanceapp.data.AttendanceDatabase
 import com.example.bluetoothattendanceapp.data.Course
+import com.example.bluetoothattendanceapp.data.User
+import com.example.bluetoothattendanceapp.utils.FirebaseManager
 import kotlinx.coroutines.launch
 import java.util.Date
+import com.example.bluetoothattendanceapp.databinding.ActivityStudentBinding
+import java.util.Timer
+import java.util.TimerTask
+import android.app.ActivityManager
 
 class StudentActivity : AppCompatActivity() {
 
     private lateinit var bluetoothAdapter: BluetoothAdapter
     private lateinit var bluetoothLeAdvertiser: BluetoothLeAdvertiser
     private lateinit var btnToggleBluetooth: MaterialButton
-    private lateinit var txtStatus: TextView
     private var isAdvertising = false
 
     // Öğrenci bilgileri (örnek olarak SharedPreferences ya da sabit değer)
@@ -64,10 +72,31 @@ class StudentActivity : AppCompatActivity() {
 
     private var permissionsRequested = false
 
+    private lateinit var firebaseManager: FirebaseManager
+    private lateinit var binding: ActivityStudentBinding
+    private var currentUser: User? = null
+
+    private val activeCourses = mutableSetOf<Course>()
+
+    private val updateTimer = Timer()
+
+    private var advertisingRetryCount = 0
+    private val MAX_RETRY_COUNT = 3
+    private val advertisingHandler = Handler(Looper.getMainLooper())
+    private var pendingAdvertisingRunnable: Runnable? = null
+
+    private var isResetting = false
+    private var lastResetTime = 0L
+
+    private val MANUFACTURER_ID = 0x0000 // Uygulamamıza özel ID
+    private val RSSI_THRESHOLD = -75 // RSSI eşik değeri
+    private val SCAN_PERIOD = 30000L // 30 saniye
+    private val scannedDevices = mutableSetOf<String>() // Taranan cihazlar
+
     companion object {
-        private const val BLUETOOTH_ADVERTISE = "android.permission.BLUETOOTH_ADVERTISE"
-        private const val BLUETOOTH_CONNECT = "android.permission.BLUETOOTH_CONNECT"
-        private const val BLUETOOTH_SCAN = "android.permission.BLUETOOTH_SCAN"
+        private const val BLUETOOTH_ADVERTISE = Manifest.permission.BLUETOOTH_ADVERTISE
+        private const val BLUETOOTH_CONNECT = Manifest.permission.BLUETOOTH_CONNECT
+        private const val BLUETOOTH_SCAN = Manifest.permission.BLUETOOTH_SCAN
         private const val PERMISSION_REQUEST_CODE = 1
     }
 
@@ -77,87 +106,220 @@ class StudentActivity : AppCompatActivity() {
             super.onStartSuccess(settingsInEffect)
             Log.d("BLEAdvertise", "Yayın başarıyla başlatıldı")
             isAdvertising = true
-            runOnUiThread { txtStatus.text = getString(R.string.broadcast_started) }
+            advertisingRetryCount = 0
+            runOnUiThread { 
+                binding.txtStatus.text = getString(R.string.broadcast_started)
+            }
+
+            // 10 saniye sonra yayını otomatik durdur
+            advertisingHandler.postDelayed({
+                cleanupAllAdvertising()
+                runOnUiThread {
+                    binding.txtStatus.text = getString(R.string.broadcast_completed)
+                }
+            }, 10000)
         }
 
         override fun onStartFailure(errorCode: Int) {
             super.onStartFailure(errorCode)
-            Log.e("BLEAdvertise", "Yayın başlatma hatası kodu: $errorCode")
+            val errorMessage = when (errorCode) {
+                ADVERTISE_FAILED_ALREADY_STARTED -> "Yayın zaten başlatılmış"
+                ADVERTISE_FAILED_DATA_TOO_LARGE -> "Yayın verisi çok büyük"
+                ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "Çok fazla yayıncı var"
+                ADVERTISE_FAILED_INTERNAL_ERROR -> "Dahili bir hata oluştu"
+                ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "Bu özellik desteklenmiyor"
+                else -> "Bilinmeyen hata kodu: $errorCode"
+            }
+            Log.e("BLEAdvertise", "Yayın başlatma hatası: $errorMessage")
             isAdvertising = false
-            runOnUiThread { txtStatus.text = getString(R.string.broadcast_failed) }
+            runOnUiThread { 
+                binding.txtStatus.text = getString(R.string.broadcast_failed)
+                Toast.makeText(applicationContext, errorMessage, Toast.LENGTH_SHORT).show()
+            }
+
+            // Hata durumunda yeniden deneme
+            if (advertisingRetryCount < MAX_RETRY_COUNT) {
+                advertisingRetryCount++
+                Log.d("BLEAdvertise", "Yayın yeniden deneniyor (${advertisingRetryCount}/${MAX_RETRY_COUNT})")
+                advertisingHandler.postDelayed({
+                    cleanupAllAdvertising()
+                }, 3000) // 3 saniye bekle
+            }
         }
     }
 
     // Öğrenci modunda ayrıca gelen durum bildirimi dinleniyorsa scan callback tanımı
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            super.onScanResult(callbackType, result)
-            result.scanRecord?.getServiceData(ParcelUuid.fromString(UuidUtils.getStatusUuid()))?.let {
-                val success = it[0] == 1.toByte()
-                showAttendanceStatus(success)
-                if (success) {
-                    stopAdvertising()
-                    Handler(Looper.getMainLooper()).postDelayed({ finish() }, 3000)
+            Log.d("BLEScan", """
+                -------- Yeni Tarama Sonucu --------
+                Cihaz Adresi: ${result.device.address}
+                Cihaz Adı: ${result.device.name ?: "İsimsiz"}
+                RSSI: ${result.rssi}
+                --------------------------------
+            """.trimIndent())
+
+            // RSSI kontrolü
+            if (result.rssi < RSSI_THRESHOLD) {
+                Log.d("BLEScan", "Zayıf sinyal: ${result.rssi} dBm")
+                return
+            }
+
+            // Manufacturer specific data kontrolü
+            val manufacturerData = result.scanRecord?.getManufacturerSpecificData(MANUFACTURER_ID)
+            if (manufacturerData == null) {
+                Log.d("BLEScan", "Manufacturer data bulunamadı")
+                return
+            }
+
+            try {
+                val dataString = String(manufacturerData, Charset.forName("UTF-8"))
+                Log.d("BLEScan", "Alınan veri: $dataString")
+                
+                // "COURSE|courseId|courseName" formatındaki veriyi parçala
+                val parts = dataString.split("|")
+                if (parts.size >= 3 && parts[0] == "COURSE") {
+                    val courseId = parts[1].toIntOrNull()
+                    if (courseId == null) {
+                        Log.e("BLEScan", "Geçersiz ders ID: ${parts[1]}")
+                        return
+                    }
+                    
+                    val courseName = parts[2]
+                    
+                    val course = Course(
+                        id = courseId,
+                        name = courseName,
+                        isActive = true
+                    )
+                    
+                    // Eğer bu ders daha önce eklenmemişse ekle
+                    if (!activeCourses.any { it.id == course.id }) {
+                        Log.d("BLEScan", "Yeni ders bulundu: $courseName (ID: $courseId)")
+                        activeCourses.add(course)
+                        
+                        runOnUiThread {
+                            updateCourseList(activeCourses.toList())
+                            binding.txtStatus.text = "Aktif ders bulundu: $courseName"
+                        }
+                    }
+                } else {
+                    Log.d("BLEScan", "Geçersiz veri formatı: $dataString")
                 }
+            } catch (e: Exception) {
+                Log.e("BLEScan", "Veri ayrıştırma hatası: ${e.message}")
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.e("BLEScan", "Tarama hatası: $errorCode")
+            runOnUiThread {
+                binding.txtStatus.text = "Tarama hatası oluştu"
             }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_student)
+        binding = ActivityStudentBinding.inflate(layoutInflater)
+        setContentView(binding.root)
 
-        database = AttendanceDatabase.getDatabase(this)
+        // Google Nearby servislerini devre dışı bırak
+        disableNearbyServices()
 
-        val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
-        bluetoothAdapter = bluetoothManager.adapter
-        bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
-
+        btnToggleBluetooth = binding.btnToggleBluetooth
         setupUI()
-        
-        // İzinleri kontrol et
-        val hasPermissions = checkPermissions()
-        Log.d("Permissions", "İzin durumu: $hasPermissions")
-        
-        if (hasPermissions) {
-            startInitialScan()
-        } else {
-            requestPermissions()
-        }
-
-        registerReceiver(bluetoothReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
-        updateBluetoothStatus(bluetoothAdapter.isEnabled)
-
-        loadStudentInfo()
-
-        courseRecyclerView = findViewById(R.id.courseRecyclerView)
+        setupBluetooth()
         setupRecyclerView()
+        firebaseManager = FirebaseManager()
+
+        // Önce kullanıcı bilgilerini al, sonra dersleri kontrol etmeye başla
+        getCurrentUserInfo()
+    }
+
+    private fun disableNearbyServices() {
+        try {
+            // Tüm Nearby servislerini agresif bir şekilde devre dışı bırak
+            val nearbyIntents = arrayOf(
+                "com.google.android.gms.nearby.DISABLE_BROADCASTING",
+                "com.google.android.gms.nearby.DISABLE_DISCOVERY",
+                "com.google.android.gms.nearby.STOP_SERVICE",
+                "com.google.android.gms.nearby.STOP_BROADCASTING",
+                "com.google.android.gms.nearby.STOP_DISCOVERY",
+                "com.google.android.gms.nearby.RESET"
+            )
+
+            nearbyIntents.forEach { action ->
+                try {
+                    sendBroadcast(Intent(action))
+                    Log.d("Nearby", "Nearby servisi devre dışı bırakıldı: $action")
+                } catch (e: Exception) {
+                    Log.e("Nearby", "Nearby servisi devre dışı bırakılamadı: $action - ${e.message}")
+                }
+            }
+
+            // Sistem servislerini kontrol et ve durdur
+            val serviceIntent = Intent()
+            serviceIntent.setPackage("com.google.android.gms")
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val services = packageManager.queryIntentServices(
+                    serviceIntent,
+                    PackageManager.ResolveInfoFlags.of(PackageManager.GET_META_DATA.toLong())
+                )
+                services.forEach { service ->
+                    try {
+                        val componentName = ComponentName(service.serviceInfo.packageName, service.serviceInfo.name)
+                        stopService(Intent().setComponent(componentName))
+                        Log.d("Nearby", "Servis durduruldu: ${service.serviceInfo.name}")
+                    } catch (e: Exception) {
+                        Log.e("Nearby", "Servis durdurulamadı: ${service.serviceInfo.name} - ${e.message}")
+                    }
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val services = packageManager.queryIntentServices(serviceIntent, PackageManager.GET_META_DATA)
+                services.forEach { service ->
+                    try {
+                        val componentName = ComponentName(service.serviceInfo.packageName, service.serviceInfo.name)
+                        stopService(Intent().setComponent(componentName))
+                        Log.d("Nearby", "Servis durduruldu: ${service.serviceInfo.name}")
+                    } catch (e: Exception) {
+                        Log.e("Nearby", "Servis durdurulamadı: ${service.serviceInfo.name} - ${e.message}")
+                    }
+                }
+            }
+
+            Log.d("Nearby", "Tüm Google Nearby servisleri devre dışı bırakıldı")
+        } catch (e: Exception) {
+            Log.e("Nearby", "Google Nearby servisleri devre dışı bırakılamadı: ${e.message}")
+        }
     }
 
     private fun setupUI() {
-        btnToggleBluetooth = findViewById(R.id.btnToggleBluetooth)
-        txtStatus = findViewById(R.id.txtStatus)
-
-        btnToggleBluetooth.setOnClickListener { toggleBluetooth() }
-
-        // Yayın başlat butonunu kaldır
-        findViewById<Button>(R.id.btnStartAdvertising)?.visibility = View.GONE
+        binding.apply {
+            btnToggleBluetooth.setOnClickListener { toggleBluetooth() }
+        }
     }
 
     private fun toggleBluetooth() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (ActivityCompat.checkSelfPermission(
-                    this,
-                    BLUETOOTH_CONNECT
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    arrayOf(BLUETOOTH_CONNECT),
-                    PERMISSION_REQUEST_CODE
-                )
-                return
-            }
+        val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ActivityCompat.checkSelfPermission(this, BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) == PackageManager.PERMISSION_GRANTED
+        }
+
+        if (!hasPermission) {
+            ActivityCompat.requestPermissions(
+                this,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    arrayOf(BLUETOOTH_CONNECT)
+                } else {
+                    arrayOf(Manifest.permission.BLUETOOTH_ADMIN)
+                },
+                PERMISSION_REQUEST_CODE
+            )
+            return
         }
 
         try {
@@ -174,14 +336,18 @@ class StudentActivity : AppCompatActivity() {
     }
 
     private fun updateBluetoothStatus(isEnabled: Boolean) {
-        btnToggleBluetooth.apply {
-            text = getString(if (isEnabled) R.string.bluetooth_on else R.string.bluetooth_off)
-            icon = AppCompatResources.getDrawable(
-                context,
-                if (isEnabled) R.drawable.ic_check else R.drawable.ic_cross
-            )
-            iconGravity = MaterialButton.ICON_GRAVITY_END
-            setTextColor(getColor(if (isEnabled) R.color.bluetooth_enabled else R.color.bluetooth_disabled))
+        binding.apply {
+            btnToggleBluetooth.apply {
+                text = getString(if (isEnabled) R.string.bluetooth_on else R.string.bluetooth_off)
+                icon = AppCompatResources.getDrawable(
+                    context,
+                    if (isEnabled) R.drawable.ic_check else R.drawable.ic_cross
+                )
+                iconGravity = MaterialButton.ICON_GRAVITY_END
+                setTextColor(getColor(if (isEnabled) android.R.color.holo_green_dark else android.R.color.holo_red_dark))
+            }
+            tvBluetoothStatus.text = if (isEnabled) "Bluetooth: Açık" else "Bluetooth: Kapalı"
+            tvBluetoothStatus.setTextColor(getColor(if (isEnabled) android.R.color.holo_green_dark else android.R.color.holo_red_dark))
         }
         if (!isEnabled && isAdvertising) {
             stopAdvertising()
@@ -190,6 +356,7 @@ class StudentActivity : AppCompatActivity() {
 
     private fun checkPermissions(): Boolean {
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Android 12 ve üzeri için
             arrayOf(
                 BLUETOOTH_ADVERTISE,
                 BLUETOOTH_CONNECT,
@@ -197,9 +364,8 @@ class StudentActivity : AppCompatActivity() {
                 Manifest.permission.ACCESS_FINE_LOCATION
             )
         } else {
+            // Android 11 ve altı için
             arrayOf(
-                Manifest.permission.BLUETOOTH,
-                Manifest.permission.BLUETOOTH_ADMIN,
                 Manifest.permission.ACCESS_FINE_LOCATION,
                 Manifest.permission.ACCESS_COARSE_LOCATION
             )
@@ -225,6 +391,7 @@ class StudentActivity : AppCompatActivity() {
         }
 
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Android 12 ve üzeri için
             arrayOf(
                 BLUETOOTH_ADVERTISE,
                 BLUETOOTH_CONNECT,
@@ -232,10 +399,10 @@ class StudentActivity : AppCompatActivity() {
                 Manifest.permission.ACCESS_FINE_LOCATION
             )
         } else {
+            // Android 11 ve altı için
             arrayOf(
-                Manifest.permission.BLUETOOTH,
-                Manifest.permission.BLUETOOTH_ADMIN,
-                Manifest.permission.ACCESS_FINE_LOCATION
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
             )
         }
 
@@ -281,9 +448,8 @@ class StudentActivity : AppCompatActivity() {
                     }
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
-                bluetoothLeAdvertiser.stopAdvertising(advertiseCallback)
-                isAdvertising = false
-                txtStatus.text = getString(R.string.broadcast_stopped)
+                cleanupAllAdvertising()
+                binding.txtStatus.text = getString(R.string.broadcast_stopped)
 
                 // Scan durumunu kontrol et
                 if (ActivityCompat.checkSelfPermission(
@@ -306,7 +472,7 @@ class StudentActivity : AppCompatActivity() {
 
     private fun updateAdvertisingStatus(status: String) {
         runOnUiThread {
-            txtStatus.text = status
+            binding.txtStatus.text = status
             Log.d("BLEAdvertise", "Durum güncellendi: $status")
         }
     }
@@ -319,11 +485,12 @@ class StudentActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        cleanupAllAdvertising()
+        pendingAdvertisingRunnable?.let { advertisingHandler.removeCallbacks(it) }
+        advertisingHandler.removeCallbacksAndMessages(null)
         unregisterReceiver(bluetoothReceiver)
-        if (isAdvertising) stopAdvertising()
         
         try {
-            // Android sürümüne göre izin kontrolü
             val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 ActivityCompat.checkSelfPermission(this, BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
             } else {
@@ -335,14 +502,13 @@ class StudentActivity : AppCompatActivity() {
                 bluetoothAdapter.bluetoothLeScanner?.stopScan(scanCallback)
                 bluetoothAdapter.bluetoothLeScanner?.stopScan(courseScanCallback)
             }
-        } catch (e: SecurityException) {
-            Log.e("BLEScan", "Tarama durdurma izin hatası: ${e.message}")
         } catch (e: Exception) {
             Log.e("BLEScan", "Tarama durdurma hatası: ${e.message}")
         }
         
         stopScanning()
         scanHandler.removeCallbacksAndMessages(null)
+        updateTimer.cancel()
     }
 
     private val bluetoothReceiver = object : BroadcastReceiver() {
@@ -361,23 +527,30 @@ class StudentActivity : AppCompatActivity() {
     private fun setupRecyclerView() {
         courseAdapter = CourseAdapter { course: Course ->
             Log.d("StudentActivity", "Ders seçildi: ${course.name}")
-            // Bluetooth durumunu kontrol et
+            
             if (!bluetoothAdapter.isEnabled) {
                 Toast.makeText(this, getString(R.string.turn_on_bluetooth), Toast.LENGTH_SHORT).show()
                 return@CourseAdapter
             }
+
+            if (currentUser == null) {
+                Log.e("StudentActivity", "Kullanıcı bilgileri henüz yüklenmedi")
+                Toast.makeText(this, "Lütfen biraz bekleyin, kullanıcı bilgileri yükleniyor", Toast.LENGTH_SHORT).show()
+                return@CourseAdapter
+            }
             
-            // Yoklama göndermeyi başlat
-            startAdvertising(course)
+            // Seçilen derse göre yoklama gönder
+            startAdvertisingForCourse(course)
         }
-        courseRecyclerView.apply {
+
+        binding.courseRecyclerView.apply {
             layoutManager = LinearLayoutManager(this@StudentActivity)
             adapter = courseAdapter
         }
     }
 
     private fun loadStudentInfo() {
-        // Öğrenci bilgilerini yükle (örnek olarak)
+        // Öğrenci bilgilerini yükle
         val prefs = getSharedPreferences("student_prefs", Context.MODE_PRIVATE)
         student = Student(
             id = prefs.getString("student_id", "12345") ?: "12345",
@@ -385,89 +558,179 @@ class StudentActivity : AppCompatActivity() {
             surname = prefs.getString("surname", "Yılmaz") ?: "Yılmaz",
             studentNumber = prefs.getString("student_number", "001") ?: "001"
         )
-        findViewById<TextView>(R.id.txtStudentInfo).text =
-            getString(R.string.student_info_format, student.name, student.surname, student.studentNumber)
-        findViewById<MaterialButton>(R.id.btnEditInfo).setOnClickListener {
-            startActivity(Intent(this, StudentLoginActivity::class.java))
-            finish()
+        
+        binding.tvUserInfo.text = buildString {
+            append("Öğrenci Bilgileri\n")
+            append("Ad: ${student.name}\n")
+            append("Soyad: ${student.surname}\n")
+            append("Öğrenci No: ${student.studentNumber}")
         }
     }
 
-    private fun startAdvertising(course: Course) {
-        Log.d("BLEAdvertise", "Yoklama gönderme başlatılıyor - Ders: ${course.name}")
-        
-        if (!bluetoothAdapter.isEnabled) {
-            Log.e("BLEAdvertise", "Bluetooth kapalı")
-            updateAdvertisingStatus(getString(R.string.turn_on_bluetooth))
-            return
-        }
-
-        // İzinleri kontrol et
-        val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ActivityCompat.checkSelfPermission(this, BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) == PackageManager.PERMISSION_GRANTED &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
-        }
-
-        if (!hasPermission) {
-            Log.e("BLEAdvertise", "Bluetooth izinleri eksik")
-            updateAdvertisingStatus("Bluetooth izinleri gerekli. Lütfen izinleri verin.")
-            requestPermissions()
-            return
-        }
-
-        try {
-            val attendanceData = buildString {
-                append(student.studentNumber ?: "")
-                append("|")
-                append(student.name.take(1))
-                append("|")
-                append(student.surname)
-                append("|")
-                append(course.id)
+    private fun startAdvertisingForCourse(course: Course) {
+        currentUser?.let { user ->
+            if (!bluetoothAdapter.isEnabled) {
+                Log.e("BLEAdvertise", "Bluetooth kapalı")
+                updateAdvertisingStatus("Bluetooth açık değil")
+                // Bluetooth'u açmak için dialog göster
+                showEnableBluetoothDialog()
+                return
             }
 
-            val dataBytes = attendanceData.toByteArray(Charset.forName("UTF-8"))
-            Log.d("BLEAdvertise", "Yoklama verisi hazırlandı: $attendanceData (${dataBytes.size} bytes)")
+            if (bluetoothLeAdvertiser == null) {
+                Log.e("BLEAdvertise", "Bluetooth LE Advertiser desteklenmiyor")
+                updateAdvertisingStatus("BLE yayını desteklenmiyor")
+                return
+            }
 
-            val settings = AdvertiseSettings.Builder()
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-                .setConnectable(false)
-                .setTimeout(0) // Süre sınırı yok
-                .build()
+            // Course ID kontrolü
+            if (course.id <= 0) {
+                Log.e("BLEAdvertise", "Geçersiz ders ID: ${course.id}")
+                updateAdvertisingStatus("Geçersiz ders ID")
+                Toast.makeText(this, "Geçersiz ders ID. Lütfen tekrar deneyin.", Toast.LENGTH_SHORT).show()
+                return
+            }
 
-            // Manufacturer specific data kullan
-            val manufacturerId = 0x0000 // Örnek manufacturer ID
-            val data = AdvertiseData.Builder()
-                .setIncludeDeviceName(false)
-                .addManufacturerData(manufacturerId, dataBytes)
-                .build()
+            Log.d("BLEAdvertise", "Yoklama gönderiliyor - Ders: ${course.name} (ID: ${course.id})")
 
-            bluetoothLeAdvertiser?.let { advertiser ->
+            // Önce bekleyen tüm işlemleri temizle
+            pendingAdvertisingRunnable?.let { advertisingHandler.removeCallbacks(it) }
+            pendingAdvertisingRunnable = null
+            
+            // Mevcut yayını temizle ve yeni yayını başlat
+            cleanupAllAdvertising()
+            startSimpleAdvertising(course, user)
+        }
+    }
+
+    private fun showEnableBluetoothDialog() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Bluetooth Gerekli")
+            .setMessage("Yoklama için Bluetooth'un açık olması gerekiyor. Bluetooth'u açmak ister misiniz?")
+            .setPositiveButton("Evet") { _, _ ->
+                val enableBtIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
                 try {
-                    advertiser.stopAdvertising(advertiseCallback)
-                    advertiser.startAdvertising(settings, data, advertiseCallback)
-                    Log.d("BLEAdvertise", "Yoklama yayını başlatıldı")
-                    updateAdvertisingStatus("Yoklama gönderiliyor...")
-
-                    // Yayını 30 saniye sonra durdur
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (isAdvertising) {
-                            stopAdvertising()
-                        }
-                    }, 30000)
-
+                    startActivity(enableBtIntent)
                 } catch (e: Exception) {
-                    Log.e("BLEAdvertise", "Yayın hatası: ${e.message}")
-                    updateAdvertisingStatus("Yayın hatası: ${e.message}")
+                    Toast.makeText(this, "Bluetooth açılamadı: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
+            .setNegativeButton("Hayır") { dialog, _ ->
+                dialog.dismiss()
+                updateAdvertisingStatus("Bluetooth açık değil")
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun startSimpleAdvertising(course: Course, user: User) {
+        try {
+            if (!bluetoothAdapter.isEnabled) {
+                showBluetoothSettingsDialog()
+                return
+            }
+
+            // Önce tüm servisleri temizle
+            cleanupAllAdvertising()
+            disableGoogleServices()
+
+            // Bluetooth'un hazır olmasını bekle
+            advertisingHandler.postDelayed({
+                try {
+                    bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
+                    if (bluetoothLeAdvertiser == null) {
+                        showBluetoothNotSupportedDialog()
+                        return@postDelayed
+                    }
+
+                    val attendanceData = buildString {
+                        append("STUDENT|")
+                        append(user.studentNumber ?: "")
+                        append("|")
+                        append(course.id)
+                    }
+
+                    Log.d("BLEAdvertise", """
+                        Yoklama verisi hazırlanıyor:
+                        - Öğrenci No: ${user.studentNumber}
+                        - Ders Adı: ${course.name}
+                        - Ders ID: ${course.id}
+                        - Veri: $attendanceData
+                    """.trimIndent())
+
+                    val dataBytes = attendanceData.toByteArray(Charset.forName("UTF-8"))
+                    Log.d("BLEAdvertise", "Yoklama verisi hazırlandı: $attendanceData (${dataBytes.size} bytes)")
+
+                    // Yayın ayarlarını optimize et
+                    val settings = AdvertiseSettings.Builder()
+                        .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                        .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+                        .setConnectable(false)
+                        .setTimeout(5000) // 5 saniye sonra otomatik durur
+                        .build()
+
+                    // Yayın verisini optimize et
+                    val data = AdvertiseData.Builder()
+                        .setIncludeDeviceName(false)
+                        .addManufacturerData(MANUFACTURER_ID, dataBytes)
+                        .build()
+
+                    // Yayını başlatmadan önce kısa bir bekleme
+                    Thread.sleep(500)
+
+                    // Yayını başlatmadan önce son bir kez daha servisleri durdur
+                    disableGoogleServices()
+
+                    // Yayını başlat
+                    bluetoothLeAdvertiser?.startAdvertising(settings, data, advertiseCallback)
+
+                } catch (e: Exception) {
+                    Log.e("BLEAdvertise", "Yayın başlatma hatası: ${e.message}")
+                    handleAdvertisingError(e.message ?: "Bilinmeyen hata", course)
+                }
+            }, 1000) // 1 saniye bekle
+
         } catch (e: Exception) {
-            Log.e("BLEAdvertise", "Veri hazırlama hatası: ${e.message}")
-            updateAdvertisingStatus("Veri hazırlama hatası: ${e.message}")
+            Log.e("BLEAdvertise", "Yoklama gönderme hatası: ${e.message}")
+            updateAdvertisingStatus("Hata: ${e.message}")
+            isAdvertising = false
         }
+    }
+
+    private fun cleanupAllAdvertising() {
+        try {
+            // Önce tüm callback'leri temizle
+            advertisingHandler.removeCallbacksAndMessages(null)
+            pendingAdvertisingRunnable?.let { advertisingHandler.removeCallbacks(it) }
+            
+            // Mevcut yayını durdur
+            try {
+                bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
+            } catch (e: Exception) {
+                Log.e("BLEAdvertise", "Yayın durdurma hatası: ${e.message}")
+            }
+
+            // Tüm Bluetooth yayınlarını temizle
+            try {
+                bluetoothAdapter.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
+            } catch (e: Exception) {
+                Log.e("BLEAdvertise", "Bluetooth yayın durdurma hatası: ${e.message}")
+            }
+
+            // Google servisleri devre dışı bırak
+            disableGoogleServices()
+
+            isAdvertising = false
+            Log.d("BLEAdvertise", "Tüm yayınlar temizlendi")
+        } catch (e: Exception) {
+            Log.e("BLEAdvertise", "Yayın temizleme hatası: ${e.message}")
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        cleanupAllAdvertising()
+        pendingAdvertisingRunnable?.let { advertisingHandler.removeCallbacks(it) }
     }
 
     private fun showPermissionSettingsDialog() {
@@ -492,136 +755,406 @@ class StudentActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun startInitialScan() {
-        if (!checkPermissions()) {
-            Log.e("BLEScan", "Bluetooth izinleri eksik")
-            updateAdvertisingStatus("Bluetooth ve konum izinleri gerekli")
-            requestPermissions()
-            return
+    private fun startActiveCoursesCheck() {
+        Log.d("StudentActivity", "Aktif ders kontrolü başlatılıyor")
+        
+        // Firebase üzerinden ders kontrolü
+        lifecycleScope.launch {
+            firebaseManager.getActiveCourses().collect { courses ->
+                Log.d("StudentActivity", "Firebase'den gelen ders sayısı: ${courses.size}")
+                updateCourseList(courses)
+            }
         }
 
-        try {
-            val serviceUuid = ParcelUuid.fromString("0000b81d-0000-1000-8000-00805f9b34fb")
-            val scanFilter = ScanFilter.Builder()
-                .setServiceUuid(serviceUuid)
-                .build()
-
-            val scanSettings = ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                .build()
-
-            // Android sürümüne göre izin kontrolü
-            val canScan = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                ActivityCompat.checkSelfPermission(this, BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
-            } else {
-                ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) == PackageManager.PERMISSION_GRANTED &&
-                ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-            }
-
-            if (!canScan) {
-                Log.e("BLEScan", "Tarama izinleri eksik")
-                updateAdvertisingStatus("Bluetooth ve konum izinleri gerekli")
-                requestPermissions()
-                return
-            }
-
-            bluetoothAdapter.bluetoothLeScanner?.let { scanner ->
-                try {
-                    isScanning = true
-                    updateAdvertisingStatus("Aktif dersler aranıyor...")
-                    scanner.startScan(listOf(scanFilter), scanSettings, courseScanCallback)
-                    scanHandler.postDelayed({
-                        stopScanning()
-                    }, 5000)
-                } catch (e: SecurityException) {
-                    Log.e("BLEScan", "Tarama izin hatası: ${e.message}")
-                    updateAdvertisingStatus("Tarama izni hatası")
-                }
-            } ?: run {
-                Log.e("BLEScan", "BluetoothLeScanner null")
-                updateAdvertisingStatus("BLE taraması desteklenmiyor")
-            }
-        } catch (e: Exception) {
-            Log.e("BLEScan", "Tarama başlatma hatası: ${e.message}")
-            updateAdvertisingStatus("Tarama başlatılamadı: ${e.message}")
-        }
-    }
-
-    private fun stopScanning() {
-        if (isScanning) {
-            try {
-                // Android sürümüne göre izin kontrolü
-                val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    ActivityCompat.checkSelfPermission(this, BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
-                } else {
-                    ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) == PackageManager.PERMISSION_GRANTED &&
-                    ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                }
-
-                if (hasPermission) {
-                    bluetoothAdapter.bluetoothLeScanner?.stopScan(courseScanCallback)
-                    isScanning = false
-                    updateAdvertisingStatus("Aktif dersler listelendi")
-                } else {
-                    Log.e("BLEScan", "Bluetooth tarama izinleri eksik")
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        requestPermissions()
+        // Bluetooth taraması için Timer
+        updateTimer.scheduleAtFixedRate(object : TimerTask() {
+            override fun run() {
+                runOnUiThread {
+                    Log.d("BLEScan", "Periyodik tarama kontrolü")
+                    if (!isScanning) {
+                        Log.d("BLEScan", "Yeni tarama başlatılıyor")
+                        startInitialScan()
+                    } else {
+                        Log.d("BLEScan", "Önceki tarama devam ediyor")
                     }
                 }
-            } catch (e: SecurityException) {
-                Log.e("BLEScan", "Tarama durdurma izin hatası: ${e.message}")
-            } catch (e: Exception) {
-                Log.e("BLEScan", "Tarama durdurma hatası: ${e.message}")
+            }
+        }, 0, 30000) // 30 saniye
+    }
+
+    private fun updateCourseList(firebaseCourses: List<Course>) {
+        val allCourses = mutableSetOf<Course>()
+        
+        // Firebase'den gelen dersleri ekle
+        allCourses.addAll(firebaseCourses)
+        
+        // Bluetooth ile bulunan dersleri Firebase ile eşleştir
+        activeCourses.forEach { bluetoothCourse ->
+            // Aynı isme sahip Firebase dersi var mı kontrol et
+            val matchingFirebaseCourse = firebaseCourses.find { it.name == bluetoothCourse.name }
+            if (matchingFirebaseCourse != null) {
+                // Firebase'deki ID'yi kullan
+                allCourses.add(bluetoothCourse.copy(id = matchingFirebaseCourse.id))
+            } else {
+                // Eşleşen ders bulunamadıysa Bluetooth'tan gelen dersi ekle
+                allCourses.add(bluetoothCourse)
             }
         }
+
+        Log.d("StudentActivity", "Toplam aktif ders sayısı: ${allCourses.size} " +
+            "(Firebase: ${firebaseCourses.size}, Bluetooth: ${activeCourses.size})")
+
+        if (allCourses.isEmpty()) {
+            binding.txtStatus.text = "Aktif ders bulunamadı"
+        } else {
+            binding.txtStatus.text = "Aktif dersler listelendi"
+        }
+
+        // RecyclerView'ı güncelle
+        courseAdapter.submitList(allCourses.toList())
     }
 
     private val courseScanCallback = object : ScanCallback() {
-        private val activeCourses = mutableMapOf<Int, Course>()
-
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val serviceUuid = ParcelUuid.fromString("0000b81d-0000-1000-8000-00805f9b34fb")
-            result.scanRecord?.getServiceData(serviceUuid)?.let { data ->
-                try {
-                    val courseData = String(data, Charset.forName("UTF-8"))
-                    if (courseData.startsWith("C|")) {
-                        val parts = courseData.split("|")
-                        if (parts.size >= 4) {
-                            val courseId = parts[1].toInt()
-                            val courseName = parts[2]
-                            val isActive = parts[3].toBoolean()
+            Log.d("BLEScan", """
+                -------- Yeni Tarama Sonucu --------
+                Cihaz Adresi: ${result.device.address}
+                Cihaz Adı: ${result.device.name ?: "İsimsiz"}
+                RSSI: ${result.rssi}
+                --------------------------------
+            """.trimIndent())
+            
+            val scanRecord = result.scanRecord
+            if (scanRecord == null) {
+                Log.e("BLEScan", "Scan record null")
+                return
+            }
 
-                            if (isActive) {
-                                val course = Course(
-                                    id = courseId,
-                                    name = courseName,
-                                    teacherId = result.device.address,
-                                    isActive = true,
-                                    createdAt = Date()
-                                )
-                                activeCourses[courseId] = course
+            // Manufacturer specific data'yı kontrol et
+            val manufacturerData = scanRecord.getManufacturerSpecificData(0x0000)
+            if (manufacturerData != null) {
+                try {
+                    val dataString = String(manufacturerData, Charset.forName("UTF-8"))
+                    Log.d("BLEScan", "Alınan veri: $dataString")
+                    
+                    // "C|courseId|courseName|isActive" formatındaki veriyi parçala
+                    val parts = dataString.split("|")
+                    if (parts.size >= 4 && parts[0] == "C") {
+                        val courseId = parts[1].toInt()
+                        val courseName = parts[2]
+                        val isActive = parts[3].toBoolean()
+                        
+                        if (isActive) {
+                            val course = Course(
+                                id = courseId,
+                                name = courseName,
+                                isActive = true
+                            )
+                            
+                            // Eğer bu ders daha önce eklenmemişse ekle
+                            if (!activeCourses.any { it.id == course.id }) {
+                                activeCourses.add(course)
+                                Log.d("BLEScan", "Yeni ders bulundu: ${course.name}")
                                 
                                 runOnUiThread {
-                                    courseAdapter.submitList(activeCourses.values.toList())
+                                    updateCourseList(activeCourses.toList())
+                                    binding.txtStatus.text = "Aktif dersler bulundu"
                                 }
-                            } else {
-                                activeCourses.remove(courseId)
                             }
-                        } else {
-                            Log.e("BLEScan", "Geçersiz ders verisi: $courseData")
                         }
-                    } else {
-                        Log.e("BLEScan", "Geçersiz ders verisi: $courseData")
                     }
                 } catch (e: Exception) {
-                    Log.e("BLEScan", "Ders verisi işleme hatası: ${e.message}")
+                    Log.e("BLEScan", "Veri ayrıştırma hatası: ${e.message}")
                 }
             }
         }
 
         override fun onScanFailed(errorCode: Int) {
-            Log.e("BLEScan", "Ders taraması başarısız: $errorCode")
+            val errorMessage = when (errorCode) {
+                ScanCallback.SCAN_FAILED_ALREADY_STARTED -> "Tarama zaten başlatılmış"
+                ScanCallback.SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> "Uygulama kaydı başarısız"
+                ScanCallback.SCAN_FAILED_INTERNAL_ERROR -> "Dahili hata"
+                ScanCallback.SCAN_FAILED_FEATURE_UNSUPPORTED -> "Özellik desteklenmiyor"
+                else -> "Bilinmeyen hata: $errorCode"
+            }
+            Log.e("BLEScan", "Tarama hatası: $errorMessage")
             stopScanning()
+            
+            runOnUiThread {
+                Toast.makeText(applicationContext, 
+                    "Tarama hatası: $errorMessage", 
+                    Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun setupBluetooth() {
+        val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
+        bluetoothAdapter = bluetoothManager.adapter
+        bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
+
+        // Bluetooth durumu değişikliklerini dinle
+        registerReceiver(bluetoothReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
+        
+        // Başlangıç durumunu kontrol et
+        updateBluetoothStatus(bluetoothAdapter.isEnabled)
+
+        // İzinleri kontrol et
+        if (checkPermissions()) {
+            startInitialScan()
+        } else {
+            requestPermissions()
+        }
+    }
+
+    private fun startInitialScan() {
+        Log.d("BLEScan", "startInitialScan çağrıldı")
+
+        if (!bluetoothAdapter.isEnabled) {
+            Log.e("BLEScan", "Bluetooth kapalı")
+            Toast.makeText(this, "Lütfen Bluetooth'u açın", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (!checkPermissions()) {
+            Log.e("BLEScan", "Bluetooth izinleri eksik")
+            requestPermissions()
+            return
+        }
+
+        if (isScanning) {
+            Log.d("BLEScan", "Tarama zaten devam ediyor")
+            return
+        }
+
+        try {
+            // Tarama başlamadan önce listeyi temizle
+            scannedDevices.clear()
+
+            val scanSettings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setReportDelay(0)
+                .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
+                .build()
+
+            val scanner = bluetoothAdapter.bluetoothLeScanner
+            if (scanner == null) {
+                Log.e("BLEScan", "BluetoothLeScanner null")
+                Toast.makeText(this, "Bluetooth LE tarayıcı başlatılamadı", Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            try {
+                Log.d("BLEScan", "Bluetooth taraması başlatılıyor...")
+                isScanning = true
+
+                scanner.startScan(null, scanSettings, scanCallback)
+                Log.d("BLEScan", "Bluetooth taraması başlatıldı")
+                
+                binding.txtStatus.text = "Yakındaki dersleri tarıyor..."
+
+                // Belirtilen süre sonra taramayı durdur
+                scanHandler.postDelayed({
+                    Log.d("BLEScan", "Tarama süresi doldu, durduruluyor")
+                    stopScanning()
+                }, SCAN_PERIOD)
+
+            } catch (e: Exception) {
+                Log.e("BLEScan", "Tarama başlatma hatası: ${e.message}")
+                isScanning = false
+                Toast.makeText(this, "Tarama başlatılamadı: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e("BLEScan", "Tarama başlatma hatası: ${e.message}")
+            isScanning = false
+            Toast.makeText(this, "Tarama hatası: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun stopScanning() {
+        Log.d("BLEScan", "stopScanning çağrıldı")
+        
+        if (!isScanning) {
+            Log.d("BLEScan", "Tarama zaten durdurulmuş")
+            return
+        }
+        
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                // Android 12 ve üzeri için izin kontrolü
+                if (ActivityCompat.checkSelfPermission(this, BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) {
+                    bluetoothAdapter.bluetoothLeScanner?.stopScan(courseScanCallback)
+                }
+            } else {
+                // Android 11 ve altı için doğrudan durdur
+                bluetoothAdapter.bluetoothLeScanner?.stopScan(courseScanCallback)
+            }
+            
+            isScanning = false
+            
+            // UI güncelle
+            runOnUiThread {
+                if (activeCourses.isEmpty()) {
+                    binding.txtStatus.text = "Yakında aktif ders bulunamadı"
+                } else {
+                    binding.txtStatus.text = "Bulunan dersler listelendi"
+                }
+                updateCourseList(emptyList())
+            }
+        } catch (e: Exception) {
+            Log.e("BLEScan", "Tarama durdurma hatası: ${e.message}")
+        } finally {
+            isScanning = false
+        }
+    }
+
+    private fun getCurrentUserInfo() {
+        lifecycleScope.launch {
+            try {
+                val user = firebaseManager.getCurrentUserDetails()
+                if (user != null) {
+                    currentUser = user
+                    Log.d("StudentActivity", "Kullanıcı bilgileri alındı: ${user.name} ${user.surname}")
+                    updateUIWithUserInfo(user)
+                    // Kullanıcı bilgileri alındıktan sonra ders kontrolünü başlat
+                    startActiveCoursesCheck()
+                } else {
+                    Log.e("StudentActivity", "Kullanıcı bilgileri null")
+                    Toast.makeText(this@StudentActivity, "Kullanıcı bilgileri alınamadı", Toast.LENGTH_SHORT).show()
+                    // Oturumu kapat ve login ekranına yönlendir
+                    firebaseManager.logout()
+                    startActivity(Intent(this@StudentActivity, LoginActivity::class.java))
+                    finish()
+                }
+            } catch (e: Exception) {
+                Log.e("StudentActivity", "Kullanıcı bilgileri alınırken hata: ${e.message}")
+                Toast.makeText(this@StudentActivity, "Kullanıcı bilgileri alınamadı: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun updateUIWithUserInfo(user: User) {
+        binding.tvUserInfo.text = buildString {
+            append("Öğrenci Bilgileri\n")
+            append("Ad: ${user.name}\n")
+            append("Soyad: ${user.surname}\n")
+            append("Öğrenci No: ${user.studentNumber ?: "Belirtilmemiş"}")
+        }
+    }
+
+    private fun handleAdvertisingError(error: String, course: Course) {
+        if (advertisingRetryCount < MAX_RETRY_COUNT) {
+            advertisingRetryCount++
+            Log.d("BLEAdvertise", "Yayın yeniden deneniyor (${advertisingRetryCount}/${MAX_RETRY_COUNT})")
+            
+            // Daha uzun bir bekleme süresi ile tekrar dene
+            advertisingHandler.postDelayed({
+                currentUser?.let { user ->
+                    startSimpleAdvertising(course, user)
+                }
+            }, 3000) // 3 saniye bekle
+            
+            updateAdvertisingStatus("Yayın yeniden deneniyor...")
+        } else {
+            advertisingRetryCount = 0
+            updateAdvertisingStatus("Yayın başlatılamadı: $error")
+            Toast.makeText(this, "Yoklama gönderilemedi. Lütfen tekrar deneyin.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun showBluetoothSettingsDialog() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Bluetooth Ayarları")
+            .setMessage("Yoklama göndermek için Bluetooth'un açık olması ve düzgün çalışması gerekiyor. Bluetooth ayarlarını açmak ister misiniz?")
+            .setPositiveButton("Bluetooth Ayarları") { _, _ ->
+                try {
+                    val intent = Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Bluetooth ayarları açılamadı: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("İptal") { dialog, _ ->
+                dialog.dismiss()
+                updateAdvertisingStatus("Bluetooth açık değil")
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun showBluetoothNotSupportedDialog() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Bluetooth Desteklenmiyor")
+            .setMessage("Cihazınız Bluetooth Low Energy yayınını desteklemiyor veya Bluetooth düzgün çalışmıyor. Lütfen Bluetooth'u kapatıp açmayı deneyin.")
+            .setPositiveButton("Bluetooth Ayarları") { _, _ ->
+                try {
+                    val intent = Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Bluetooth ayarları açılamadı: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("İptal") { dialog, _ -> dialog.dismiss() }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun disableGoogleServices() {
+        try {
+            // Google Play Services'i tamamen devre dışı bırak
+            val googlePlayServices = "com.google.android.gms"
+            
+            // Tüm Google servislerini zorla durdur
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            am.killBackgroundProcesses(googlePlayServices)
+            
+            // Nearby servislerini agresif bir şekilde durdur
+            val nearbyIntents = arrayOf(
+                "com.google.android.gms.nearby.DISABLE_BROADCASTING",
+                "com.google.android.gms.nearby.DISABLE_DISCOVERY",
+                "com.google.android.gms.nearby.STOP_SERVICE",
+                "com.google.android.gms.nearby.STOP_BROADCASTING",
+                "com.google.android.gms.nearby.STOP_DISCOVERY",
+                "com.google.android.gms.nearby.RESET"
+            )
+            
+            nearbyIntents.forEach { action ->
+                try {
+                    val intent = Intent(action)
+                    intent.setPackage(googlePlayServices)
+                    intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+                    sendBroadcast(intent)
+                    Log.d("Services", "Nearby servisi durduruldu: $action")
+                } catch (e: Exception) {
+                    Log.e("Services", "Nearby servisi durdurulamadı: $action - ${e.message}")
+                }
+            }
+            
+            // Google Play Services'i geçici olarak devre dışı bırak
+            packageManager.setApplicationEnabledSetting(
+                googlePlayServices,
+                PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER,
+                PackageManager.DONT_KILL_APP
+            )
+            
+            Log.d("Services", "Google Play Services devre dışı bırakıldı")
+            
+            // 5 saniye sonra Google Play Services'i tekrar etkinleştir
+            Handler(Looper.getMainLooper()).postDelayed({
+                try {
+                    packageManager.setApplicationEnabledSetting(
+                        googlePlayServices,
+                        PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                        PackageManager.DONT_KILL_APP
+                    )
+                    Log.d("Services", "Google Play Services tekrar etkinleştirildi")
+                } catch (e: Exception) {
+                    Log.e("Services", "Google Play Services etkinleştirilemedi: ${e.message}")
+                }
+            }, 5000)
+            
+        } catch (e: Exception) {
+            Log.e("Services", "Google servisleri devre dışı bırakılamadı: ${e.message}")
         }
     }
 }

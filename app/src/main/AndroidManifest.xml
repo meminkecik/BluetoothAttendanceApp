@@ -56,14 +56,25 @@
 
         <!-- Ana aktivite -->
         <activity
-            android:name=".MainActivity"
+            android:name=".SplashActivity"
             android:exported="true"
-            android:screenOrientation="portrait">
+            android:theme="@style/Theme.AppCompat.Light.NoActionBar">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Login ve Register Aktiviteleri -->
+        <activity
+            android:name=".LoginActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
+            android:name=".RegisterActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
 
         <!-- Diğer aktiviteler -->
         <activity
@@ -89,5 +100,16 @@
             android:label="@string/student_login"
             android:exported="false"
             android:screenOrientation="portrait" />
+
+        <activity
+            android:name=".TeacherAttendanceHistoryActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".AttendanceRecordsActivity"
+            android:exported="false"
+            android:label="@string/attendance_records"
+            android:theme="@style/Theme.BluetoothAttendanceApp.NoActionBar"
+            android:parentActivityName=".TeacherModeActivity"/>
     </application>
 </manifest>

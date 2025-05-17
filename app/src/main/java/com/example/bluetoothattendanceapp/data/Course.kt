@@ -12,14 +12,26 @@ data class Course(
     val id: Int = 0,
 
     @ColumnInfo(name = "name")
-    val name: String,
+    val name: String = "",
 
     @ColumnInfo(name = "teacher_id")
-    val teacherId: String,
+    val teacherId: String = "",
 
     @ColumnInfo(name = "is_active")
     val isActive: Boolean = false,
 
     @ColumnInfo(name = "created_at")
     val createdAt: Date = Date()
-) 
+) {
+    constructor() : this(0, "", "", false, Date())
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is Course) return false
+        return id == other.id
+    }
+
+    override fun hashCode(): Int {
+        return id
+    }
+} 
