@@ -2,6 +2,7 @@ package com.example.bluetoothattendanceapp
 
 import android.Manifest
 import android.Manifest.permission.BLUETOOTH_ADVERTISE
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.AdvertiseCallback
@@ -25,6 +26,8 @@ import android.os.Looper
 import android.os.ParcelUuid
 import android.provider.Settings
 import android.util.Log
+import android.view.Menu
+import android.view.MenuItem
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -41,6 +44,7 @@ import com.example.bluetoothattendanceapp.data.Course
 import com.example.bluetoothattendanceapp.data.CourseDao
 import com.example.bluetoothattendanceapp.data.FirebaseAttendanceRecord
 import com.example.bluetoothattendanceapp.utils.FirebaseManager
+import com.example.bluetoothattendanceapp.utils.SessionManager
 import com.example.bluetoothattendanceapp.utils.UuidUtils
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.textfield.TextInputEditText
@@ -49,17 +53,25 @@ import java.nio.charset.Charset
 import java.util.Date
 import java.util.UUID
 import com.example.bluetoothattendanceapp.databinding.ActivityTeacherBinding
+import com.example.bluetoothattendanceapp.databinding.ActivityTeacherModeBinding
+import com.example.bluetoothattendanceapp.data.User
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.Calendar
+import com.google.firebase.database.FirebaseDatabase
+import kotlinx.coroutines.tasks.await
 
 class TeacherModeActivity : AppCompatActivity() {
 
-    private lateinit var binding: ActivityTeacherBinding
+    private lateinit var binding: ActivityTeacherModeBinding
     private lateinit var bluetoothAdapter: BluetoothAdapter
     private lateinit var bluetoothLeScanner: BluetoothLeScanner
     private var bluetoothLeAdvertiser: BluetoothLeAdvertiser? = null
-    private lateinit var btnToggleBluetooth: MaterialButton
+    private lateinit var btnToggleAttendance: MaterialButton
     private lateinit var btnStartAttendance: MaterialButton
     private lateinit var deviceAdapter: DeviceAdapter
     private var isScanning = false
+    private var isAttendanceActive = false
 
     // Veritabanı
     private lateinit var database: AttendanceDatabase
@@ -73,11 +85,19 @@ class TeacherModeActivity : AppCompatActivity() {
     private var currentCourseId: Int = -1
 
     private lateinit var firebaseManager: FirebaseManager
+    private lateinit var sessionManager: SessionManager
     private var sessionId: String? = null
 
     private lateinit var advertisingHandler: Handler
     private lateinit var advertiseCallback: AdvertiseCallback
     private var isAdvertising = false
+
+    private var currentUser: User? = null
+
+    private lateinit var mutex: Mutex
+
+    // Firebase referansını ekleyelim
+    private val databaseReference = FirebaseDatabase.getInstance().reference
 
     companion object {
         private const val BLUETOOTH_CONNECT = "android.permission.BLUETOOTH_CONNECT"
@@ -244,20 +264,24 @@ class TeacherModeActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityTeacherBinding.inflate(layoutInflater)
+        binding = ActivityTeacherModeBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         // Google Nearby servisini tamamen devre dışı bırak
         disableNearbyServices()
         
-        setupUI()
-        setupBluetooth()
-        setupRecyclerView()
-
+        // Mutex başlatma
+        mutex = Mutex()
+        
         // Firebase ve veritabanı başlatma
         firebaseManager = FirebaseManager(this)
+        sessionManager = SessionManager(this)
         database = AttendanceDatabase.getDatabase(this)
         courseDao = database.courseDao()
+
+        setupBluetooth()
+        setupRecyclerView() // Önce RecyclerView'ı kur
+        setupUI() // Sonra UI'ı kur
 
         // Kullanıcı verilerini senkronize et
         lifecycleScope.launch {
@@ -289,46 +313,18 @@ class TeacherModeActivity : AppCompatActivity() {
     }
 
     private fun setupUI() {
-        btnToggleBluetooth = binding.btnToggleBluetooth
-        btnStartAttendance = binding.btnStartAttendance
-        courseNameInput = binding.courseNameInput
-
-        val recyclerView = binding.deviceList
-        deviceAdapter = DeviceAdapter()
-        recyclerView.layoutManager = LinearLayoutManager(this@TeacherModeActivity)
-        recyclerView.adapter = deviceAdapter
-
-        btnToggleBluetooth.setOnClickListener { toggleBluetooth() }
-        btnStartAttendance.setOnClickListener { startAttendance() }
-        binding.btnShowRecords.setOnClickListener { showAttendanceRecords() }
-
-        // Veritabanından yoklama kayıtlarını gözlemle
-        lifecycleScope.launch {
-            try {
-                // Belirli bir tarihe ait yoklamaları al
-                database.attendanceDao().getAttendanceByDate(Date()).collect { records ->
-                    Log.d("Attendance", "Günlük kayıtlar alındı: ${records.size} kayıt")
-                    records.forEach { record ->
-                        Log.d("Attendance", "Kayıt: ${record.studentName} ${record.studentSurname} (${record.studentNumber})")
-                    }
-
-                    deviceAdapter.updateDevices(records.map { record ->
-                        DeviceAdapter.BluetoothDevice(
-                            name = buildString {
-                                append("Öğrenci: ${record.studentName} ${record.studentSurname}")
-                                if (!record.studentNumber.isNullOrBlank()) {
-                                    append(" (${record.studentNumber})")
-                                }
-                            },
-                            address = record.deviceAddress,
-                            timestamp = record.timestamp
-                        )
-                    })
+        binding.apply {
+            btnToggleAttendance.setOnClickListener { 
+                if (isAttendanceActive) {
+                    stopAttendance()
+                } else {
+                    startAttendance()
                 }
-            } catch (e: Exception) {
-                Log.e("Attendance", "Veritabanı okuma hatası: ${e.message}", e)
             }
         }
+
+        // İlk başta öğrenci sayısını sıfır olarak göster
+        binding.tvStudentCount.text = "Toplam Öğrenci: 0"
     }
 
     private fun checkAndRequestPermissions() {
@@ -375,7 +371,7 @@ class TeacherModeActivity : AppCompatActivity() {
     }
 
     private fun startAttendance() {
-        val courseName = courseNameInput.text.toString().trim()
+        val courseName = binding.courseNameInput.text.toString().trim()
         if (courseName.isEmpty()) {
             Toast.makeText(this, "Lütfen ders adını girin", Toast.LENGTH_SHORT).show()
             return
@@ -397,18 +393,81 @@ class TeacherModeActivity : AppCompatActivity() {
                 val updatedCourse = course.copy(id = courseId)
                 Log.d("TeacherMode", "Yeni ders oluşturuldu: ${updatedCourse.name} (ID: ${updatedCourse.id})")
 
+                // Listeyi temizle ve öğrenci sayısını sıfırla
+                deviceAdapter.updateDevices(emptyList())
+                updateStudentCount()
+
                 // Taramayı başlat
                 startScanning()
 
                 // Güncellenmiş course objesi ile yayını başlat
                 startCourseAdvertising(updatedCourse)
 
-                binding.txtStatus.text = getString(R.string.broadcast_started)
-                btnStartAttendance.text = getString(R.string.stop_attendance)
-                btnStartAttendance.setIconResource(R.drawable.ic_stop)
+                binding.tvStatus.text = getString(R.string.broadcast_started)
+                binding.btnToggleAttendance.text = getString(R.string.stop_attendance)
+                binding.btnToggleAttendance.setIconResource(R.drawable.ic_stop)
+                isAttendanceActive = true
+
+                // Öğretmen bilgilerini al ve Firebase oturumunu oluştur
+                getCurrentUserInfo()
+
+                // Mevcut ders için yoklama kayıtlarını gözlemle
+                observeCurrentCourseAttendance()
             } catch (e: Exception) {
                 Log.e("TeacherMode", "Ders başlatma hatası: ${e.message}")
                 Toast.makeText(this@TeacherModeActivity, "Ders başlatılamadı: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun observeCurrentCourseAttendance() {
+        lifecycleScope.launch {
+            try {
+                // Bugünün başlangıcını al
+                val calendar = Calendar.getInstance()
+                calendar.set(Calendar.HOUR_OF_DAY, 0)
+                calendar.set(Calendar.MINUTE, 0)
+                calendar.set(Calendar.SECOND, 0)
+                calendar.set(Calendar.MILLISECOND, 0)
+                val startOfDay = calendar.time
+
+                database.attendanceDao().getAttendanceByCourseId(currentCourseId).collect { allRecords ->
+                    Log.d("Attendance", "Tüm kayıtlar alındı: ${allRecords.size} kayıt")
+                    
+                    // Sadece bugünün kayıtlarını filtrele
+                    val todayRecords = allRecords.filter { record -> 
+                        record.timestamp >= startOfDay
+                    }
+
+                    // Öğrenci numarasına göre grupla (her öğrencinin en son kaydını al)
+                    val uniqueRecords = todayRecords
+                        .groupBy { it.studentNumber }
+                        .mapValues { (_, records) -> 
+                            records.maxByOrNull { it.timestamp }!! 
+                        }
+                        .values
+                        .sortedBy { "${it.studentName} ${it.studentSurname}" }
+                        .toList()
+
+                    Log.d("Attendance", """
+                        Tekil kayıtlar:
+                        - Toplam kayıt: ${uniqueRecords.size}
+                        - Bugünkü kayıt: ${todayRecords.size}
+                        - Tarih filtresi: ${startOfDay}
+                    """.trimIndent())
+
+                    val devices = uniqueRecords.map { record ->
+                        DeviceAdapter.BluetoothDevice(
+                            name = "${record.studentName} ${record.studentSurname} (${record.studentNumber})",
+                            address = record.deviceAddress,
+                            timestamp = record.timestamp
+                        )
+                    }
+                    
+                    updateDeviceList(devices)
+                }
+            } catch (e: Exception) {
+                Log.e("Attendance", "Veritabanı okuma hatası: ${e.message}", e)
             }
         }
     }
@@ -443,11 +502,11 @@ class TeacherModeActivity : AppCompatActivity() {
                     scanCallback
                 )
                 Log.d("BLEScan", "Yoklama taraması başlatıldı")
-                binding.txtStatus.text = "Öğrenci yoklaması bekleniyor..."
+                binding.tvStatus.text = "Öğrenci yoklaması bekleniyor..."
             }
         } catch (e: Exception) {
             Log.e("BLEScan", "Tarama başlatma hatası: ${e.message}")
-            binding.txtStatus.text = "Tarama başlatılamadı: ${e.message}"
+            binding.tvStatus.text = "Tarama başlatılamadı: ${e.message}"
         }
     }
 
@@ -510,7 +569,7 @@ class TeacherModeActivity : AppCompatActivity() {
 
                     // Yayını başlatmadan önce kısa bir bekleme
                     Thread.sleep(500)
-                    
+
                     bluetoothLeAdvertiser?.startAdvertising(settings, data, object : AdvertiseCallback() {
                         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
                             Log.d("BLEAdvertise", "Ders yayını başarıyla başlatıldı")
@@ -603,7 +662,7 @@ class TeacherModeActivity : AppCompatActivity() {
 
     private fun updateAdvertisingStatus(status: String) {
         runOnUiThread {
-            binding.txtStatus.text = status
+            binding.tvStatus.text = status
             Log.d("BLEAdvertise", "Durum güncellendi: $status")
         }
     }
@@ -611,107 +670,95 @@ class TeacherModeActivity : AppCompatActivity() {
     private suspend fun saveAttendanceRecord(result: ScanResult, studentNumber: String) {
         try {
             Log.d("BLEScan", """
-                Yoklama kaydı ekleniyor:
+                Yoklama kaydı kontrol ediliyor:
                 - Öğrenci No: $studentNumber
                 - MAC Adresi: ${result.device.address}
                 - Ders ID: $currentCourseId
             """.trimIndent())
 
-            // Önce mevcut yoklama kaydını kontrol et
-            val hasExisting = database.attendanceDao().hasExistingAttendance(
-                courseId = currentCourseId,
-                deviceAddress = result.device.address
-            )
+            // Mutex ile thread-safe kontrol
+            mutex.withLock {
+                // 1. KONTROL: Öğrenci numarası daha önce kaydedilmiş mi?
+                val existingStudentRecord = database.attendanceDao().getAttendanceByStudentNumber(
+                    courseId = currentCourseId,
+                    studentNumber = studentNumber
+                )
 
-            if (hasExisting) {
-                Log.d("BLEScan", "Bu cihaz için zaten yoklama kaydı mevcut")
-                sendAttendanceStatus(result.device, false)
-                return
-            }
-
-            // Firebase'den öğrenci bilgilerini al
-            Log.d("BLEScan", "Firebase'den öğrenci bilgileri alınıyor...")
-            var studentInfo = firebaseManager.getStudentByNumber(studentNumber)
-            
-            if (studentInfo != null) {
-                Log.d("BLEScan", """
-                    Öğrenci bilgileri başarıyla alındı:
-                    - Öğrenci No: $studentNumber
-                    - Ad: ${studentInfo.name}
-                    - Soyad: ${studentInfo.surname}
-                    - Email: ${studentInfo.email}
-                    - Kullanıcı Tipi: ${studentInfo.userType}
-                """.trimIndent())
-            } else {
-                Log.e("BLEScan", "Öğrenci bilgileri Firebase'den alınamadı!")
-                // Firebase'den bilgi alınamadığında yerel veritabanını kontrol et
-                val localUser = database.userDao().getUserByStudentNumber(studentNumber)
-                if (localUser != null) {
-                    Log.d("BLEScan", "Öğrenci bilgileri yerel veritabanında bulundu")
-                    studentInfo = localUser.toUser()
-                } else {
-                    Log.e("BLEScan", "Öğrenci bilgileri yerel veritabanında da bulunamadı")
+                if (existingStudentRecord != null) {
+                    Log.d("BLEScan", "Bu öğrenci numarası için zaten yoklama kaydı mevcut: $studentNumber")
+                    sendAttendanceStatus(result.device, false)
+                    return
                 }
-            }
-            
-            val attendanceRecord = AttendanceRecord(
-                courseId = currentCourseId,
-                deviceAddress = result.device.address,
-                studentName = studentInfo?.name ?: "Bilinmeyen",
-                studentSurname = studentInfo?.surname ?: "Öğrenci",
-                studentNumber = studentNumber,
-                timestamp = Date()
-            )
-            
-            // Önce yerel veritabanına kaydet
-            database.attendanceDao().insertAttendance(attendanceRecord)
-            Log.d("BLEScan", """
-                Yoklama kaydı yerel veritabanına eklendi:
-                - Öğrenci: ${attendanceRecord.studentName} ${attendanceRecord.studentSurname}
-                - Numara: ${attendanceRecord.studentNumber}
-                - Ders ID: ${attendanceRecord.courseId}
-            """.trimIndent())
-            
-            // Firebase'e kaydet
-            sessionId?.let { id ->
-                Log.d("BLEScan", "Firebase'e yoklama kaydı ekleniyor - Session ID: $id")
-                val firebaseRecord = FirebaseAttendanceRecord(
-                    studentId = result.device.address,
-                    studentName = studentInfo?.name ?: "Bilinmeyen",
-                    studentSurname = studentInfo?.surname ?: "Öğrenci",
+
+                // 2. KONTROL: Bu cihaz daha önce kaydedilmiş mi?
+                val existingDeviceRecord = database.attendanceDao().hasExistingAttendance(
+                    courseId = currentCourseId,
+                    deviceAddress = result.device.address
+                )
+
+                if (existingDeviceRecord) {
+                    Log.d("BLEScan", "Bu cihaz için zaten yoklama kaydı mevcut: ${result.device.address}")
+                    sendAttendanceStatus(result.device, false)
+                    return
+                }
+
+                // Firebase'den öğrenci bilgilerini al
+                Log.d("BLEScan", "Firebase'den öğrenci bilgileri alınıyor...")
+                var studentInfo = firebaseManager.getStudentByNumber(studentNumber)
+                
+                if (studentInfo == null) {
+                    Log.e("BLEScan", "Öğrenci bilgileri Firebase'den alınamadı!")
+                    // Firebase'den bilgi alınamadığında yerel veritabanını kontrol et
+                    val localUser = database.userDao().getUserByStudentNumber(studentNumber)
+                    if (localUser != null) {
+                        Log.d("BLEScan", "Öğrenci bilgileri yerel veritabanında bulundu")
+                        studentInfo = localUser.toUser()
+                    } else {
+                        Log.e("BLEScan", "Öğrenci bilgileri yerel veritabanında da bulunamadı")
+                        sendAttendanceStatus(result.device, false)
+                        return
+                    }
+                }
+                
+                val attendanceRecord = AttendanceRecord(
+                    courseId = currentCourseId,
+                    deviceAddress = result.device.address,
+                    studentName = studentInfo.name,
+                    studentSurname = studentInfo.surname,
                     studentNumber = studentNumber,
-                    timestamp = attendanceRecord.timestamp.time
+                    timestamp = Date()
                 )
                 
-                firebaseManager.addAttendanceRecord(id, firebaseRecord)
-                    .onSuccess {
-                        Log.d("BLEScan", "Yoklama kaydı Firebase'e başarıyla eklendi")
-                    }
-                    .onFailure { exception ->
-                        Log.e("BLEScan", "Firebase kayıt hatası: ${exception.message}")
-                        exception.printStackTrace()
-                    }
-            } ?: run {
-                Log.e("BLEScan", "Session ID null olduğu için Firebase'e kayıt yapılamadı")
-            }
-
-            Log.d("BLEScan", "Yoklama kaydı başarıyla eklendi")
-            recordedDevices.add(result.device.address)
-            sendAttendanceStatus(result.device, true)
-            
-            val device = DeviceAdapter.BluetoothDevice(
-                name = buildString {
-                    append(studentInfo?.let { "${it.name} ${it.surname}" } ?: "Bilinmeyen Öğrenci")
-                    append(" (")
-                    append(studentNumber)
-                    append(")")
-                },
-                address = result.device.address,
-                timestamp = Date()
-            )
-            runOnUiThread {
-                deviceAdapter.addDevice(device)
-                Log.d("BLEScan", "Cihaz listesi güncellendi: ${device.name}")
+                // Yerel veritabanına kaydet
+                database.attendanceDao().insertAttendance(attendanceRecord)
+                Log.d("BLEScan", """
+                    Yoklama kaydı yerel veritabanına eklendi:
+                    - Öğrenci: ${attendanceRecord.studentName} ${attendanceRecord.studentSurname}
+                    - Numara: ${attendanceRecord.studentNumber}
+                    - Ders ID: ${attendanceRecord.courseId}
+                """.trimIndent())
+                
+                // Firebase'e kaydet
+                sessionId?.let { id ->
+                    Log.d("BLEScan", "Firebase'e yoklama kaydı ekleniyor - Session ID: $id")
+                    val firebaseRecord = FirebaseAttendanceRecord(
+                        studentId = result.device.address,
+                        studentName = studentInfo.name,
+                        studentSurname = studentInfo.surname,
+                        studentNumber = studentNumber,
+                        timestamp = attendanceRecord.timestamp.time
+                    )
+                    
+                    firebaseManager.addAttendanceRecord(id, firebaseRecord)
+                        .onSuccess {
+                            Log.d("BLEScan", "Yoklama kaydı Firebase'e başarıyla eklendi")
+                            sendAttendanceStatus(result.device, true)
+                        }
+                        .onFailure { exception ->
+                            Log.e("BLEScan", "Firebase kayıt hatası: ${exception.message}")
+                            exception.printStackTrace()
+                        }
+                }
             }
         } catch (e: Exception) {
             Log.e("BLEScan", "Yoklama kaydı eklenemedi: ${e.message}")
@@ -776,8 +823,13 @@ class TeacherModeActivity : AppCompatActivity() {
                 advertiseSettings,
                 advertiseData,
                 object : android.bluetooth.le.AdvertiseCallback() {
+                    @SuppressLint("MissingPermission")
                     override fun onStartSuccess(settingsInEffect: android.bluetooth.le.AdvertiseSettings) {
                         Log.d("BLEScan", "Durum bildirimi başarılı: ${device.address}")
+                        // 1 saniye sonra durdur
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            bluetoothAdapter.bluetoothLeAdvertiser.stopAdvertising(this)
+                        }, 1000)
                     }
 
                     override fun onStartFailure(errorCode: Int) {
@@ -791,8 +843,11 @@ class TeacherModeActivity : AppCompatActivity() {
     }
 
     private fun updateBluetoothStatus(isEnabled: Boolean) {
-        btnToggleBluetooth.text = if (isEnabled) getString(R.string.bluetooth_on) else getString(R.string.bluetooth_off)
-        // Ek UI güncellemelerini buraya ekleyebilirsin (örneğin buton renkleri vs.)
+        binding.btnToggleAttendance.text = if (isEnabled) {
+            getString(R.string.start_attendance)
+        } else {
+            getString(R.string.bluetooth_off)
+        }
     }
 
     override fun onResume() {
@@ -825,7 +880,21 @@ class TeacherModeActivity : AppCompatActivity() {
     }
 
     private fun setupRecyclerView() {
-        // Implement the logic to set up the RecyclerView
+        deviceAdapter = DeviceAdapter()
+        binding.rvDevices.apply {
+            adapter = deviceAdapter
+            layoutManager = LinearLayoutManager(this@TeacherModeActivity)
+        }
+    }
+
+    private fun updateStudentCount() {
+        val count = deviceAdapter.getStudentCount()
+        binding.tvStudentCount.text = "Toplam Öğrenci: $count"
+    }
+
+    private fun updateDeviceList(devices: List<DeviceAdapter.BluetoothDevice>) {
+        deviceAdapter.updateDevices(devices)
+        updateStudentCount()
     }
 
     private fun getCurrentUserInfo() {
@@ -852,18 +921,47 @@ class TeacherModeActivity : AppCompatActivity() {
     private fun createAttendanceSession(teacherId: String) {
         lifecycleScope.launch {
             try {
-                firebaseManager.createAttendanceSession(
-                    teacherId = teacherId,
-                    courseName = courseNameInput.text.toString(),
-                    courseId = currentCourseId
-                ).onSuccess { id ->
-                    sessionId = id
-                    Log.d("TeacherMode", "Yoklama oturumu oluşturuldu: $id")
-                }.onFailure { exception ->
-                    Log.e("TeacherMode", "Yoklama oturumu oluşturulamadı: ${exception.message}")
+                // Course ID kontrolü
+                if (currentCourseId <= 0) {
+                    Log.e("TeacherMode", "Geçersiz ders ID: $currentCourseId")
+                    Toast.makeText(this@TeacherModeActivity, "Geçersiz ders ID", Toast.LENGTH_SHORT).show()
+                    return@launch
                 }
+
+                // Ders adı kontrolü
+                val courseName = binding.courseNameInput.text.toString().trim()
+                if (courseName.isBlank()) {
+                    Log.e("TeacherMode", "Ders adı boş olamaz")
+                    Toast.makeText(this@TeacherModeActivity, "Ders adı boş olamaz", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                Log.d("TeacherMode", "Yoklama oturumu oluşturuluyor - Öğretmen: $teacherId, Ders: $courseName, ID: $currentCourseId")
+
+                // Firebase'e gönderilecek veriyi hazırla
+                val sessionData = hashMapOf(
+                    "teacherId" to teacherId,
+                    "courseName" to courseName,
+                    "courseId" to currentCourseId,
+                    "date" to Date().time,
+                    "isActive" to true,
+                    "attendees" to HashMap<String, Any>()
+                )
+
+                // Firebase veritabanı referansını al
+                val database = FirebaseDatabase.getInstance()
+                val sessionRef = database.reference.child("attendance_sessions").push()
+                
+                // Veriyi Firebase'e gönder
+                sessionRef.setValue(sessionData).await()
+                sessionId = sessionRef.key
+                
+                Log.d("TeacherMode", "Yoklama oturumu Firebase'e kaydedildi: $sessionId")
+                Log.d("TeacherMode", "Ders Bilgileri - Ad: $courseName, ID: $currentCourseId")
+
             } catch (e: Exception) {
-                Log.e("TeacherMode", "Yoklama oturumu oluşturma hatası: ${e.message}")
+                Log.e("TeacherMode", "Yoklama oturumu oluşturulurken hata: ${e.message}")
+                Toast.makeText(this@TeacherModeActivity, "Yoklama oturumu oluşturulamadı: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -871,5 +969,84 @@ class TeacherModeActivity : AppCompatActivity() {
     private fun showAttendanceRecords() {
         val intent = Intent(this, AttendanceRecordsActivity::class.java)
         startActivity(intent)
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.main_menu, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.action_logout -> {
+                performLogout()
+                true
+            }
+            R.id.action_past_attendances -> {
+                startActivity(Intent(this, PastAttendancesActivity::class.java))
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    private fun performLogout() {
+        try {
+            // Aktif yoklama varsa durdur
+            stopAttendanceIfActive()
+            // Firebase oturumunu kapat
+            firebaseManager.logout()
+            // Session'ı temizle
+            sessionManager.clearSession()
+            // Login ekranına yönlendir
+            startActivity(Intent(this, LoginActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            })
+            finish()
+        } catch (e: Exception) {
+            Log.e("TeacherModeActivity", "Çıkış yapılırken hata: ${e.message}")
+            Toast.makeText(this, "Çıkış yapılırken hata oluştu: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun stopAttendanceIfActive() {
+        // Eğer aktif bir yoklama varsa durdur
+        if (isAttendanceActive) {
+            stopAttendance()
+        }
+    }
+
+    private fun stopAttendance() {
+        try {
+            // Taramayı durdur
+            stopScanning()
+            // Yayını durdur
+            cleanupAdvertising()
+            // Firebase oturumunu kapat
+            sessionId?.let { id ->
+                lifecycleScope.launch {
+                    firebaseManager.closeAttendanceSession(id)
+                }
+            }
+            isAttendanceActive = false
+            binding.tvStatus.text = "Yoklama durduruldu"
+            binding.btnToggleAttendance.text = getString(R.string.start_attendance)
+            binding.btnToggleAttendance.setIconResource(R.drawable.ic_play)
+
+            // Dersi pasif yap
+            lifecycleScope.launch {
+                try {
+                    courseDao.updateCourseStatus(currentCourseId, false)
+                    // Listeyi temizle
+                    deviceAdapter.updateDevices(emptyList())
+                    updateStudentCount()
+                } catch (e: Exception) {
+                    Log.e("TeacherMode", "Ders durumu güncellenirken hata: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("TeacherMode", "Yoklama durdurma hatası: ${e.message}")
+            Toast.makeText(this, "Yoklama durdurulamadı: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 }

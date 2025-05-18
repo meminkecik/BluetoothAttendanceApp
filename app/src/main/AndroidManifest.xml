@@ -111,5 +111,14 @@
             android:label="@string/attendance_records"
             android:theme="@style/Theme.BluetoothAttendanceApp.NoActionBar"
             android:parentActivityName=".TeacherModeActivity"/>
+
+        <activity
+            android:name=".PastAttendancesActivity"
+            android:theme="@style/Theme.BluetoothAttendanceApp.NoActionBar" />
+        <activity
+            android:name=".AttendanceDetailsActivity"
+            android:exported="false"
+            android:label="Yoklama Detayları"
+            android:theme="@style/Theme.BluetoothAttendanceApp.NoActionBar" />
     </application>
 </manifest>

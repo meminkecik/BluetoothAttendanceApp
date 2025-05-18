@@ -25,6 +25,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import android.widget.Button
 import android.widget.TextView
@@ -50,6 +52,7 @@ import com.example.bluetoothattendanceapp.databinding.ActivityStudentBinding
 import java.util.Timer
 import java.util.TimerTask
 import android.app.ActivityManager
+import com.example.bluetoothattendanceapp.utils.SessionManager
 
 class StudentActivity : AppCompatActivity() {
 
@@ -92,6 +95,13 @@ class StudentActivity : AppCompatActivity() {
     private val RSSI_THRESHOLD = -75 // RSSI eşik değeri
     private val SCAN_PERIOD = 30000L // 30 saniye
     private val scannedDevices = mutableSetOf<String>() // Taranan cihazlar
+
+    private lateinit var sessionManager: SessionManager
+
+    // Yoklama gönderilen dersleri takip etmek için
+    private val attendedCourses = mutableSetOf<Int>()
+    private val ATTENDANCE_PREFS = "attendance_prefs"
+    private val ATTENDED_COURSES_KEY = "attended_courses"
 
     companion object {
         private const val BLUETOOTH_ADVERTISE = Manifest.permission.BLUETOOTH_ADVERTISE
@@ -231,10 +241,29 @@ class StudentActivity : AppCompatActivity() {
         setupUI()
         setupBluetooth()
         setupRecyclerView()
-        firebaseManager = FirebaseManager()
+        firebaseManager = FirebaseManager(this)
+        sessionManager = SessionManager(this)
 
         // Önce kullanıcı bilgilerini al, sonra dersleri kontrol etmeye başla
         getCurrentUserInfo()
+
+        // Daha önce yoklama gönderilen dersleri yükle
+        loadAttendedCourses()
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.main_menu, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.action_logout -> {
+                performLogout()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
     }
 
     private fun disableNearbyServices() {
@@ -569,10 +598,20 @@ class StudentActivity : AppCompatActivity() {
 
     private fun startAdvertisingForCourse(course: Course) {
         currentUser?.let { user ->
+            // Önce bu derse daha önce yoklama gönderilip gönderilmediğini kontrol et
+            if (attendedCourses.contains(course.id)) {
+                Log.d("StudentActivity", "Bu derse (${course.name}) zaten yoklama gönderilmiş")
+                Toast.makeText(
+                    this,
+                    "Bu derse bugün zaten yoklama gönderdiniz",
+                    Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+
             if (!bluetoothAdapter.isEnabled) {
                 Log.e("BLEAdvertise", "Bluetooth kapalı")
                 updateAdvertisingStatus("Bluetooth açık değil")
-                // Bluetooth'u açmak için dialog göster
                 showEnableBluetoothDialog()
                 return
             }
@@ -600,6 +639,9 @@ class StudentActivity : AppCompatActivity() {
             // Mevcut yayını temizle ve yeni yayını başlat
             cleanupAllAdvertising()
             startSimpleAdvertising(course, user)
+            
+            // Yoklama gönderilen dersi kaydet
+            saveAttendedCourse(course.id)
         }
     }
 
@@ -1156,5 +1198,69 @@ class StudentActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.e("Services", "Google servisleri devre dışı bırakılamadı: ${e.message}")
         }
+    }
+
+    private fun performLogout() {
+        try {
+            // Firebase oturumunu kapat
+            firebaseManager.logout()
+            // Session'ı temizle
+            sessionManager.clearSession()
+            // Login ekranına yönlendir
+            startActivity(Intent(this, LoginActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            })
+            finish()
+        } catch (e: Exception) {
+            Log.e("StudentActivity", "Çıkış yapılırken hata: ${e.message}")
+            Toast.makeText(this, "Çıkış yapılırken hata oluştu: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun loadAttendedCourses() {
+        val prefs = getSharedPreferences(ATTENDANCE_PREFS, Context.MODE_PRIVATE)
+        val attendedCoursesStr = prefs.getString(ATTENDED_COURSES_KEY, "")
+        if (attendedCoursesStr?.isNotEmpty() == true) {
+            attendedCourses.addAll(
+                attendedCoursesStr.split(",")
+                    .mapNotNull { it.toIntOrNull() }
+            )
+        }
+        
+        // Gece yarısında listeyi temizle
+        val lastResetTime = prefs.getLong("last_reset_time", 0)
+        val currentTime = System.currentTimeMillis()
+        if (shouldResetAttendance(lastResetTime, currentTime)) {
+            resetAttendedCourses(currentTime)
+        }
+    }
+
+    private fun shouldResetAttendance(lastResetTime: Long, currentTime: Long): Boolean {
+        val lastResetDate = java.util.Calendar.getInstance().apply { timeInMillis = lastResetTime }
+        val currentDate = java.util.Calendar.getInstance().apply { timeInMillis = currentTime }
+        
+        // Eğer farklı günlerse veya son sıfırlama zamanı 0 ise true döndür
+        return lastResetTime == 0L || 
+               lastResetDate.get(java.util.Calendar.DAY_OF_YEAR) != currentDate.get(java.util.Calendar.DAY_OF_YEAR) ||
+               lastResetDate.get(java.util.Calendar.YEAR) != currentDate.get(java.util.Calendar.YEAR)
+    }
+
+    private fun resetAttendedCourses(currentTime: Long) {
+        attendedCourses.clear()
+        getSharedPreferences(ATTENDANCE_PREFS, Context.MODE_PRIVATE).edit().apply {
+            putString(ATTENDED_COURSES_KEY, "")
+            putLong("last_reset_time", currentTime)
+            apply()
+        }
+        Log.d("StudentActivity", "Yoklama listesi sıfırlandı")
+    }
+
+    private fun saveAttendedCourse(courseId: Int) {
+        attendedCourses.add(courseId)
+        getSharedPreferences(ATTENDANCE_PREFS, Context.MODE_PRIVATE).edit().apply {
+            putString(ATTENDED_COURSES_KEY, attendedCourses.joinToString(","))
+            apply()
+        }
+        Log.d("StudentActivity", "Ders $courseId yoklamaya eklendi")
     }
 }

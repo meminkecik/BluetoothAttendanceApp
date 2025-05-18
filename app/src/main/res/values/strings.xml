@@ -50,4 +50,5 @@
     <string name="broadcast_completed">Yoklama gönderimi tamamlandı</string>
     <string name="status_idle">Hazır</string>
     <string name="course_name_hint">Ders Adı</string>
+    <string name="logout">Çıkış Yap</string>
 </resources>
