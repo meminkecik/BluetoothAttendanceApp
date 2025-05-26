@@ -2,9 +2,9 @@ package com.example.bluetoothattendanceapp.utils
 
 import android.content.Context
 import android.content.SharedPreferences
-import com.example.bluetoothattendanceapp.data.UserType
+import com.example.bluetoothattendanceapp.data.model.UserType
 
-class SessionManager(private val context: Context) {
+class SessionManager(context: Context) {
     private val sharedPreferences: SharedPreferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
     private val editor: SharedPreferences.Editor = sharedPreferences.edit()
 

@@ -59,7 +59,7 @@
 
         <!-- Ana aktivite -->
         <activity
-            android:name=".SplashActivity"
+            android:name=".ui.auth.SplashActivity"
             android:exported="true"
             android:theme="@style/Theme.AppCompat.Light.NoActionBar">
             <intent-filter>
@@ -70,56 +70,56 @@
 
         <!-- Login ve Register Aktiviteleri -->
         <activity
-            android:name=".LoginActivity"
+            android:name=".ui.auth.LoginActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
 
         <activity
-            android:name=".RegisterActivity"
+            android:name=".ui.auth.RegisterActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
 
         <!-- Diğer aktiviteler -->
         <activity
-            android:name=".TeacherModeActivity"
+            android:name=".ui.teacher.TeacherModeActivity"
             android:label="@string/teacher_mode"
             android:exported="false"
             android:screenOrientation="portrait" />
             
         <activity
-            android:name=".StudentActivity"
+            android:name=".ui.student.StudentActivity"
             android:label="@string/student_mode"
             android:exported="false"
             android:screenOrientation="portrait" />
             
         <activity
-            android:name=".TeacherAttendanceActivity"
+            android:name=".ui.teacher.TeacherAttendanceActivity"
             android:label="@string/attendance_records"
             android:exported="false"
             android:screenOrientation="portrait" />
             
         <activity
-            android:name=".StudentLoginActivity"
+            android:name=".ui.auth.StudentLoginActivity"
             android:label="@string/student_login"
             android:exported="false"
             android:screenOrientation="portrait" />
 
         <activity
-            android:name=".TeacherAttendanceHistoryActivity"
+            android:name=".ui.teacher.TeacherAttendanceHistoryActivity"
             android:exported="false" />
 
         <activity
-            android:name=".AttendanceRecordsActivity"
+            android:name=".ui.teacher.AttendanceRecordsActivity"
             android:exported="false"
             android:label="@string/attendance_records"
             android:theme="@style/Theme.BluetoothAttendanceApp.NoActionBar"
-            android:parentActivityName=".TeacherModeActivity"/>
+            android:parentActivityName=".ui.teacher.TeacherModeActivity"/>
 
         <activity
-            android:name=".PastAttendancesActivity"
+            android:name=".ui.teacher.PastAttendancesActivity"
             android:theme="@style/Theme.BluetoothAttendanceApp.NoActionBar" />
         <activity
-            android:name=".AttendanceDetailsActivity"
+            android:name=".ui.teacher.AttendanceDetailsActivity"
             android:exported="false"
             android:label="Yoklama Detayları"
             android:theme="@style/Theme.BluetoothAttendanceApp.NoActionBar" />
