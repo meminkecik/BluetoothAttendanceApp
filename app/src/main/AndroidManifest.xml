@@ -16,8 +16,11 @@
     
     <!-- Android 12 ve sonrası için -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" 
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" 
+        tools:targetApi="s" />
 
     <!-- Dosya işlemleri için -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />

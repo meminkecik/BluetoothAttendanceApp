@@ -143,14 +143,16 @@ class TeacherModeActivity : AppCompatActivity() {
     // Tarama işlemi sırasında alınan reklam verisini parçalarına ayırıp birleştirme mantığı
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            super.onScanResult(callbackType, result)
-
-            Log.d("BLEScan", """
-                Yeni tarama sonucu:
-                - Adres: ${result.device.address}
-                - RSSI: ${result.rssi}
-                - Device Name: ${result.device.name}
-                - Manufacturer Data: ${result.scanRecord?.manufacturerSpecificData?.toString()}
+            Log.d("BLEScan_TEACHER_RAW", """
+                -------- HAM TARAMA SONUCU --------
+                Cihaz Adresi: ${result.device?.address}
+                Cihaz Adı: ${result.device?.name ?: "İsimsiz"}
+                RSSI: ${result.rssi}
+                Scan Record: ${result.scanRecord}
+                Manufacturer Data: ${result.scanRecord?.manufacturerSpecificData}
+                Service Data: ${result.scanRecord?.serviceData}
+                Service UUIDs: ${result.scanRecord?.serviceUuids}
+                --------------------------------
             """.trimIndent())
 
             // Bu MAC adresi daha önce kaydedildiyse işleme alma
@@ -371,6 +373,11 @@ class TeacherModeActivity : AppCompatActivity() {
     }
 
     private fun startAttendance() {
+        if (!checkBluetoothPermissions()) {
+            Log.e("TeacherMode", "Bluetooth izinleri eksik")
+            return
+        }
+
         val courseName = binding.courseNameInput.text.toString().trim()
         if (courseName.isEmpty()) {
             Toast.makeText(this, "Lütfen ders adını girin", Toast.LENGTH_SHORT).show()
@@ -530,6 +537,14 @@ class TeacherModeActivity : AppCompatActivity() {
             // Bluetooth'un hazır olmasını bekle
             advertisingHandler.postDelayed({
                 try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        if (ActivityCompat.checkSelfPermission(this, BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) {
+                            Log.e("BLEAdvertise", "BLUETOOTH_ADVERTISE izni eksik")
+                            permissionLauncher.launch(arrayOf(BLUETOOTH_ADVERTISE))
+                            return@postDelayed
+                        }
+                    }
+
                     bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
                     if (bluetoothLeAdvertiser == null) {
                         Log.e("BLEAdvertise", "BLE Advertiser null")
@@ -770,22 +785,30 @@ class TeacherModeActivity : AppCompatActivity() {
 
     private fun checkBluetoothPermissions(): Boolean {
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(BLUETOOTH_SCAN, BLUETOOTH_CONNECT, Manifest.permission.ACCESS_FINE_LOCATION)
+            arrayOf(
+                BLUETOOTH_CONNECT,
+                BLUETOOTH_SCAN,
+                BLUETOOTH_ADVERTISE,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
         } else {
-            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            )
         }
+
         val missingPermissions = permissions.filter {
             ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
+
         if (missingPermissions.isNotEmpty()) {
-            Toast.makeText(
-                this,
-                "Gerekli izinler eksik: ${missingPermissions.joinToString()}",
-                Toast.LENGTH_SHORT
-            ).show()
+            Log.d("Permissions", "Eksik izinler: ${missingPermissions.joinToString()}")
             permissionLauncher.launch(missingPermissions.toTypedArray())
             return false
         }
+
+        Log.d("Permissions", "Tüm izinler mevcut")
         return true
     }
 

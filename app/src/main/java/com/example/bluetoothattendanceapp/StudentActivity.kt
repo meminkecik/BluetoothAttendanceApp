@@ -114,7 +114,20 @@ class StudentActivity : AppCompatActivity() {
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
             super.onStartSuccess(settingsInEffect)
-            Log.d("BLEAdvertise", "Yayın başarıyla başlatıldı")
+            val advertiseMode = when (settingsInEffect.txPowerLevel) {
+                AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY -> "Düşük Gecikme"
+                AdvertiseSettings.ADVERTISE_MODE_BALANCED -> "Dengeli"
+                AdvertiseSettings.ADVERTISE_MODE_LOW_POWER -> "Düşük Güç"
+                else -> "Bilinmeyen"
+            }
+            
+            Log.i("BLEAdvertise_STUDENT", """
+                YOKLAMA YAYINI BAŞARIYLA BAŞLATILDI!
+                - Tx Power Level: ${settingsInEffect.txPowerLevel}
+                - Advertise Mode: $advertiseMode
+                - Timeout: ${settingsInEffect.timeout}
+                - Connectable: ${settingsInEffect.isConnectable}
+            """.trimIndent())
             isAdvertising = true
             advertisingRetryCount = 0
             runOnUiThread { 
@@ -140,7 +153,12 @@ class StudentActivity : AppCompatActivity() {
                 ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "Bu özellik desteklenmiyor"
                 else -> "Bilinmeyen hata kodu: $errorCode"
             }
-            Log.e("BLEAdvertise", "Yayın başlatma hatası: $errorMessage")
+            Log.e("BLEAdvertise_STUDENT", """
+                YOKLAMA YAYINI BAŞLATMA HATASI!
+                - Hata Kodu: $errorCode
+                - Hata Mesajı: $errorMessage
+                - Deneme Sayısı: $advertisingRetryCount
+            """.trimIndent())
             isAdvertising = false
             runOnUiThread { 
                 binding.txtStatus.text = getString(R.string.broadcast_failed)
@@ -150,7 +168,7 @@ class StudentActivity : AppCompatActivity() {
             // Hata durumunda yeniden deneme
             if (advertisingRetryCount < MAX_RETRY_COUNT) {
                 advertisingRetryCount++
-                Log.d("BLEAdvertise", "Yayın yeniden deneniyor (${advertisingRetryCount}/${MAX_RETRY_COUNT})")
+                Log.d("BLEAdvertise_STUDENT", "Yayın yeniden deneniyor (${advertisingRetryCount}/${MAX_RETRY_COUNT})")
                 advertisingHandler.postDelayed({
                     cleanupAllAdvertising()
                 }, 3000) // 3 saniye bekle
@@ -234,8 +252,8 @@ class StudentActivity : AppCompatActivity() {
         binding = ActivityStudentBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Google Nearby servislerini devre dışı bırak
-        disableNearbyServices()
+        // Google Nearby servislerini devre dışı bırakma çağrısını kaldırıyoruz
+        // disableNearbyServices()
 
         btnToggleBluetooth = binding.btnToggleBluetooth
         setupUI()
@@ -383,9 +401,8 @@ class StudentActivity : AppCompatActivity() {
         }
     }
 
-    private fun checkPermissions(): Boolean {
+    private fun checkBluetoothPermissions(): Boolean {
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // Android 12 ve üzeri için
             arrayOf(
                 BLUETOOTH_ADVERTISE,
                 BLUETOOTH_CONNECT,
@@ -393,7 +410,6 @@ class StudentActivity : AppCompatActivity() {
                 Manifest.permission.ACCESS_FINE_LOCATION
             )
         } else {
-            // Android 11 ve altı için
             arrayOf(
                 Manifest.permission.ACCESS_FINE_LOCATION,
                 Manifest.permission.ACCESS_COARSE_LOCATION
@@ -406,6 +422,7 @@ class StudentActivity : AppCompatActivity() {
 
         if (missingPermissions.isNotEmpty()) {
             Log.d("Permissions", "Eksik izinler: ${missingPermissions.joinToString()}")
+            requestPermissions(missingPermissions.toTypedArray())
             return false
         }
 
@@ -413,26 +430,10 @@ class StudentActivity : AppCompatActivity() {
         return true
     }
 
-    private fun requestPermissions() {
+    private fun requestPermissions(permissions: Array<String>) {
         if (permissionsRequested) {
             showPermissionSettingsDialog()
             return
-        }
-
-        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // Android 12 ve üzeri için
-            arrayOf(
-                BLUETOOTH_ADVERTISE,
-                BLUETOOTH_CONNECT,
-                BLUETOOTH_SCAN,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            )
-        } else {
-            // Android 11 ve altı için
-            arrayOf(
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            )
         }
 
         permissionsRequested = true
@@ -465,7 +466,7 @@ class StudentActivity : AppCompatActivity() {
     }
 
     private fun stopAdvertising() {
-        if (!checkPermissions()) return
+        if (!checkBluetoothPermissions()) return
 
         try {
             if (ActivityCompat.checkSelfPermission(
@@ -667,18 +668,33 @@ class StudentActivity : AppCompatActivity() {
 
     private fun startSimpleAdvertising(course: Course, user: User) {
         try {
+            // İzinleri kontrol et
+            if (!checkBluetoothPermissions()) {
+                Log.e("BLEAdvertise_STUDENT", "Bluetooth izinleri eksik")
+                requestPermissions(arrayOf(BLUETOOTH_ADVERTISE, BLUETOOTH_CONNECT, BLUETOOTH_SCAN, Manifest.permission.ACCESS_FINE_LOCATION))
+                return
+            }
+
             if (!bluetoothAdapter.isEnabled) {
                 showBluetoothSettingsDialog()
                 return
             }
 
-            // Önce tüm servisleri temizle
+            // Önceki yayınları temizle
             cleanupAllAdvertising()
-            disableGoogleServices()
 
             // Bluetooth'un hazır olmasını bekle
             advertisingHandler.postDelayed({
                 try {
+                    // İzinleri tekrar kontrol et
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        if (ActivityCompat.checkSelfPermission(this, BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) {
+                            Log.e("BLEAdvertise_STUDENT", "BLUETOOTH_ADVERTISE izni eksik")
+                            requestPermissions(arrayOf(BLUETOOTH_ADVERTISE, BLUETOOTH_CONNECT, BLUETOOTH_SCAN, Manifest.permission.ACCESS_FINE_LOCATION))
+                            return@postDelayed
+                        }
+                    }
+
                     bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
                     if (bluetoothLeAdvertiser == null) {
                         showBluetoothNotSupportedDialog()
@@ -692,7 +708,7 @@ class StudentActivity : AppCompatActivity() {
                         append(course.id)
                     }
 
-                    Log.d("BLEAdvertise", """
+                    Log.d("BLEAdvertise_STUDENT", """
                         Yoklama verisi hazırlanıyor:
                         - Öğrenci No: ${user.studentNumber}
                         - Ders Adı: ${course.name}
@@ -701,14 +717,14 @@ class StudentActivity : AppCompatActivity() {
                     """.trimIndent())
 
                     val dataBytes = attendanceData.toByteArray(Charset.forName("UTF-8"))
-                    Log.d("BLEAdvertise", "Yoklama verisi hazırlandı: $attendanceData (${dataBytes.size} bytes)")
+                    Log.d("BLEAdvertise_STUDENT", "Yoklama verisi hazırlandı: $attendanceData (${dataBytes.size} bytes)")
 
                     // Yayın ayarlarını optimize et
                     val settings = AdvertiseSettings.Builder()
                         .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
                         .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
                         .setConnectable(false)
-                        .setTimeout(5000) // 5 saniye sonra otomatik durur
+                        .setTimeout(30000) // 30 saniye
                         .build()
 
                     // Yayın verisini optimize et
@@ -717,23 +733,18 @@ class StudentActivity : AppCompatActivity() {
                         .addManufacturerData(MANUFACTURER_ID, dataBytes)
                         .build()
 
-                    // Yayını başlatmadan önce kısa bir bekleme
-                    Thread.sleep(500)
-
-                    // Yayını başlatmadan önce son bir kez daha servisleri durdur
-                    disableGoogleServices()
-
                     // Yayını başlat
                     bluetoothLeAdvertiser?.startAdvertising(settings, data, advertiseCallback)
+                    Log.d("BLEAdvertise_STUDENT", "Yoklama yayını başlatıldı")
 
                 } catch (e: Exception) {
-                    Log.e("BLEAdvertise", "Yayın başlatma hatası: ${e.message}")
+                    Log.e("BLEAdvertise_STUDENT", "Yayın başlatma hatası: ${e.message}")
                     handleAdvertisingError(e.message ?: "Bilinmeyen hata", course)
                 }
             }, 1000) // 1 saniye bekle
 
         } catch (e: Exception) {
-            Log.e("BLEAdvertise", "Yoklama gönderme hatası: ${e.message}")
+            Log.e("BLEAdvertise_STUDENT", "Yoklama gönderme hatası: ${e.message}")
             updateAdvertisingStatus("Hata: ${e.message}")
             isAdvertising = false
         }
@@ -748,19 +759,10 @@ class StudentActivity : AppCompatActivity() {
             // Mevcut yayını durdur
             try {
                 bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
+                Log.d("BLEAdvertise", "Bluetooth yayını durduruldu")
             } catch (e: Exception) {
-                Log.e("BLEAdvertise", "Yayın durdurma hatası: ${e.message}")
+                Log.e("BLEAdvertise", "Bluetooth yayını durdurma hatası: ${e.message}")
             }
-
-            // Tüm Bluetooth yayınlarını temizle
-            try {
-                bluetoothAdapter.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
-            } catch (e: Exception) {
-                Log.e("BLEAdvertise", "Bluetooth yayın durdurma hatası: ${e.message}")
-            }
-
-            // Google servisleri devre dışı bırak
-            disableGoogleServices()
 
             isAdvertising = false
             Log.d("BLEAdvertise", "Tüm yayınlar temizlendi")
@@ -942,10 +944,10 @@ class StudentActivity : AppCompatActivity() {
         updateBluetoothStatus(bluetoothAdapter.isEnabled)
 
         // İzinleri kontrol et
-        if (checkPermissions()) {
+        if (checkBluetoothPermissions()) {
             startInitialScan()
         } else {
-            requestPermissions()
+            requestPermissions(arrayOf(BLUETOOTH_ADVERTISE, BLUETOOTH_CONNECT, BLUETOOTH_SCAN, Manifest.permission.ACCESS_FINE_LOCATION))
         }
     }
 
@@ -958,9 +960,9 @@ class StudentActivity : AppCompatActivity() {
             return
         }
 
-        if (!checkPermissions()) {
+        if (!checkBluetoothPermissions()) {
             Log.e("BLEScan", "Bluetooth izinleri eksik")
-            requestPermissions()
+            requestPermissions(arrayOf(BLUETOOTH_ADVERTISE, BLUETOOTH_CONNECT, BLUETOOTH_SCAN, Manifest.permission.ACCESS_FINE_LOCATION))
             return
         }
 
@@ -1142,62 +1144,8 @@ class StudentActivity : AppCompatActivity() {
     }
 
     private fun disableGoogleServices() {
-        try {
-            // Google Play Services'i tamamen devre dışı bırak
-            val googlePlayServices = "com.google.android.gms"
-            
-            // Tüm Google servislerini zorla durdur
-            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            am.killBackgroundProcesses(googlePlayServices)
-            
-            // Nearby servislerini agresif bir şekilde durdur
-            val nearbyIntents = arrayOf(
-                "com.google.android.gms.nearby.DISABLE_BROADCASTING",
-                "com.google.android.gms.nearby.DISABLE_DISCOVERY",
-                "com.google.android.gms.nearby.STOP_SERVICE",
-                "com.google.android.gms.nearby.STOP_BROADCASTING",
-                "com.google.android.gms.nearby.STOP_DISCOVERY",
-                "com.google.android.gms.nearby.RESET"
-            )
-            
-            nearbyIntents.forEach { action ->
-                try {
-                    val intent = Intent(action)
-                    intent.setPackage(googlePlayServices)
-                    intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
-                    sendBroadcast(intent)
-                    Log.d("Services", "Nearby servisi durduruldu: $action")
-                } catch (e: Exception) {
-                    Log.e("Services", "Nearby servisi durdurulamadı: $action - ${e.message}")
-                }
-            }
-            
-            // Google Play Services'i geçici olarak devre dışı bırak
-            packageManager.setApplicationEnabledSetting(
-                googlePlayServices,
-                PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER,
-                PackageManager.DONT_KILL_APP
-            )
-            
-            Log.d("Services", "Google Play Services devre dışı bırakıldı")
-            
-            // 5 saniye sonra Google Play Services'i tekrar etkinleştir
-            Handler(Looper.getMainLooper()).postDelayed({
-                try {
-                    packageManager.setApplicationEnabledSetting(
-                        googlePlayServices,
-                        PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                        PackageManager.DONT_KILL_APP
-                    )
-                    Log.d("Services", "Google Play Services tekrar etkinleştirildi")
-                } catch (e: Exception) {
-                    Log.e("Services", "Google Play Services etkinleştirilemedi: ${e.message}")
-                }
-            }, 5000)
-            
-        } catch (e: Exception) {
-            Log.e("Services", "Google servisleri devre dışı bırakılamadı: ${e.message}")
-        }
+        // Fonksiyon içeriğini boşaltıyoruz
+        Log.d("Services", "Google servisleri devre dışı bırakma işlemi kaldırıldı")
     }
 
     private fun performLogout() {
