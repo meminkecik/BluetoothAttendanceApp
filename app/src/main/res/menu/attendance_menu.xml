@@ -3,10 +3,12 @@
     xmlns:app="http://schemas.android.com/apk/res-auto">
     <item
         android:id="@+id/action_export_pdf"
-        android:title="PDF Olarak Kaydet"
-        app:showAsAction="never" />
+        android:title="PDF Olarak Dışa Aktar"
+        android:icon="@drawable/ic_pdf"
+        app:showAsAction="ifRoom" />
     <item
         android:id="@+id/action_export_csv"
-        android:title="CSV Olarak Kaydet"
-        app:showAsAction="never" />
+        android:title="CSV Olarak Dışa Aktar"
+        android:icon="@drawable/ic_csv"
+        app:showAsAction="ifRoom" />
 </menu> 

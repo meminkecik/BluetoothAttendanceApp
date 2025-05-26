@@ -1,20 +1,29 @@
 package com.example.bluetoothattendanceapp.ui.teacher
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.os.Bundle
+import android.os.Environment
 import android.util.Log
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.example.bluetoothattendanceapp.R
 import com.example.bluetoothattendanceapp.databinding.ActivityAttendanceDetailsBinding
 import com.example.bluetoothattendanceapp.ui.common.AttendanceDetailsAdapter
 import com.google.firebase.database.FirebaseDatabase
+import com.itextpdf.kernel.pdf.PdfWriter
+import com.opencsv.CSVWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -24,6 +33,9 @@ class AttendanceDetailsActivity : AppCompatActivity() {
     private lateinit var adapter: AttendanceDetailsAdapter
     private lateinit var sessionId: String
     private val database = FirebaseDatabase.getInstance().reference
+    private var courseName: String = ""
+    private var attendanceDate: Long = 0
+    private var attendees: List<AttendeeInfo> = emptyList()
 
     companion object {
         private const val TAG = "AttendanceDetails"
@@ -34,9 +46,9 @@ class AttendanceDetailsActivity : AppCompatActivity() {
         binding = ActivityAttendanceDetailsBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        binding.toolbar.title = "Yoklama Detayları"
-        binding.toolbar.setNavigationIcon(androidx.appcompat.R.drawable.abc_ic_ab_back_material)
-        binding.toolbar.setNavigationOnClickListener { onBackPressed() }
+        setSupportActionBar(binding.toolbar)
+        supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        supportActionBar?.title = "Yoklama Detayları"
 
         sessionId = intent.getStringExtra(PastAttendancesActivity.EXTRA_COURSE_ID) ?: run {
             Toast.makeText(this, "Geçersiz oturum", Toast.LENGTH_SHORT).show()
@@ -46,6 +58,144 @@ class AttendanceDetailsActivity : AppCompatActivity() {
 
         setupRecyclerView()
         loadAttendanceDetails()
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.attendance_menu, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.action_export_pdf -> {
+                exportToPdf()
+                true
+            }
+            R.id.action_export_csv -> {
+                exportToCSV()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    private fun exportToPdf() {
+        lifecycleScope.launch {
+            try {
+                val dateFormat = SimpleDateFormat("yyyy-MM-dd_HH-mm", Locale.getDefault())
+                val fileName = "Yoklama_${dateFormat.format(Date(attendanceDate))}.pdf"
+                val filePath = File(getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), fileName)
+
+                val pdfWriter = PdfWriter(filePath)
+                val pdf = com.itextpdf.kernel.pdf.PdfDocument(pdfWriter)
+                val document = com.itextpdf.layout.Document(pdf)
+
+                document.add(
+                    com.itextpdf.layout.element.Paragraph(
+                        "$courseName Dersi - Yoklama Listesi\n${
+                            SimpleDateFormat("dd/MM/yyyy", Locale.getDefault()).format(Date(attendanceDate))
+                        }"
+                    )
+                )
+                document.add(com.itextpdf.layout.element.Paragraph(" "))
+
+                val table = com.itextpdf.layout.element.Table(4).useAllAvailableWidth()
+
+                arrayOf("Sıra", "Ad", "Soyad", "Öğrenci No").forEach { header ->
+                    table.addCell(
+                        com.itextpdf.layout.element.Cell().add(
+                            com.itextpdf.layout.element.Paragraph(header)
+                        ).setBold()
+                    )
+                }
+
+                attendees.forEachIndexed { index, attendee ->
+                    table.addCell(
+                        com.itextpdf.layout.element.Cell().add(
+                            com.itextpdf.layout.element.Paragraph((index + 1).toString())
+                        )
+                    )
+                    table.addCell(
+                        com.itextpdf.layout.element.Cell().add(
+                            com.itextpdf.layout.element.Paragraph(attendee.studentName)
+                        )
+                    )
+                    table.addCell(
+                        com.itextpdf.layout.element.Cell().add(
+                            com.itextpdf.layout.element.Paragraph(attendee.studentSurname)
+                        )
+                    )
+                    table.addCell(
+                        com.itextpdf.layout.element.Cell().add(
+                            com.itextpdf.layout.element.Paragraph(attendee.studentNumber)
+                        )
+                    )
+                }
+
+                document.add(table)
+                document.close()
+
+                shareFile(filePath, "application/pdf")
+                Toast.makeText(this@AttendanceDetailsActivity, "PDF dosyası oluşturuldu", Toast.LENGTH_SHORT).show()
+
+            } catch (e: Exception) {
+                Log.e(TAG, "PDF oluşturma hatası: ${e.message}", e)
+                Toast.makeText(this@AttendanceDetailsActivity, "PDF oluşturma hatası: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun exportToCSV() {
+        lifecycleScope.launch {
+            try {
+                val dateFormat = SimpleDateFormat("yyyy-MM-dd_HH-mm", Locale.getDefault())
+                val fileName = "Yoklama_${dateFormat.format(Date(attendanceDate))}.csv"
+                val filePath = File(getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), fileName)
+
+                FileWriter(filePath).use { writer ->
+                    val csvWriter = CSVWriter(writer)
+
+                    csvWriter.writeNext(arrayOf("Sıra", "Ad", "Soyad", "Öğrenci No", "Katılım Saati"))
+
+                    attendees.forEachIndexed { index, attendee ->
+                        csvWriter.writeNext(arrayOf(
+                            (index + 1).toString(),
+                            attendee.studentName,
+                            attendee.studentSurname,
+                            attendee.studentNumber,
+                            attendee.timestamp
+                        ))
+                    }
+
+                    csvWriter.writeNext(arrayOf("Ders", courseName))
+                    csvWriter.writeNext(arrayOf("Tarih", SimpleDateFormat("dd/MM/yyyy", Locale.getDefault()).format(Date(attendanceDate))))
+                    csvWriter.writeNext(arrayOf())
+                }
+
+                shareFile(filePath, "text/csv")
+                Toast.makeText(this@AttendanceDetailsActivity, "CSV dosyası oluşturuldu", Toast.LENGTH_SHORT).show()
+
+            } catch (e: Exception) {
+                Log.e(TAG, "CSV oluşturma hatası: ${e.message}", e)
+                Toast.makeText(this@AttendanceDetailsActivity, "CSV oluşturma hatası: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun shareFile(file: File, mimeType: String) {
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            this,
+            "${packageName}.provider",
+            file
+        )
+
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = mimeType
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            putExtra(Intent.EXTRA_STREAM, uri)
+        }
+
+        startActivity(Intent.createChooser(intent, "Dosyayı Paylaş"))
     }
 
     private fun setupRecyclerView() {
@@ -74,15 +224,14 @@ class AttendanceDetailsActivity : AppCompatActivity() {
                     return@launch
                 }
 
-                val courseName = sessionSnapshot.child("courseName").getValue(String::class.java) ?: "Bilinmeyen Ders"
-                val date = sessionSnapshot.child("date").getValue(Long::class.java)?.let { 
-                    SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()).format(Date(it))
-                } ?: "Tarih bilgisi yok"
+                courseName = sessionSnapshot.child("courseName").getValue(String::class.java) ?: "Bilinmeyen Ders"
+                attendanceDate = sessionSnapshot.child("date").getValue(Long::class.java) ?: System.currentTimeMillis()
+                val date = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()).format(Date(attendanceDate))
 
                 binding.tvCourseName.text = courseName
                 binding.tvDate.text = date
 
-                val attendees = mutableListOf<AttendeeInfo>()
+                val attendeesList = mutableListOf<AttendeeInfo>()
                 val attendeesSnapshot = sessionSnapshot.child("attendees")
                 
                 attendeesSnapshot.children.forEach { attendeeSnapshot ->
@@ -92,7 +241,7 @@ class AttendanceDetailsActivity : AppCompatActivity() {
                     val timestamp = attendeeSnapshot.child("timestamp").getValue(Long::class.java)
 
                     if (studentNumber != null && studentName != null && studentSurname != null && timestamp != null) {
-                        attendees.add(
+                        attendeesList.add(
                             AttendeeInfo(
                                 studentNumber = studentNumber,
                                 studentName = studentName,
@@ -103,6 +252,7 @@ class AttendanceDetailsActivity : AppCompatActivity() {
                     }
                 }
 
+                attendees = attendeesList.sortedBy { it.studentName }
                 binding.tvAttendeeCount.text = "Toplam ${attendees.size} Katılımcı"
 
                 if (attendees.isEmpty()) {
@@ -111,7 +261,7 @@ class AttendanceDetailsActivity : AppCompatActivity() {
                 } else {
                     binding.tvEmpty.visibility = View.GONE
                     binding.rvAttendanceDetails.visibility = View.VISIBLE
-                    adapter.submitList(attendees.sortedBy { it.studentName })
+                    adapter.submitList(attendees)
                 }
 
                 Log.d(TAG, "Yoklama detayları başarıyla yüklendi: $courseName, ${attendees.size} katılımcı")
