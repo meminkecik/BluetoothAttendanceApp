@@ -439,7 +439,12 @@ class TeacherModeActivity : AppCompatActivity() {
                 val startOfDay = calendar.time
 
                 database.attendanceDao().getAttendanceByCourseId(currentCourseId).collect { allRecords ->
-                    Log.d("Attendance", "Tüm kayıtlar alındı: ${allRecords.size} kayıt")
+                    Log.d("Attendance", """
+                        Tüm kayıtlar alındı:
+                        - Toplam kayıt: ${allRecords.size}
+                        - Ders ID: $currentCourseId
+                        - Tarih: ${startOfDay}
+                    """.trimIndent())
                     
                     // Sadece bugünün kayıtlarını filtrele
                     val todayRecords = allRecords.filter { record -> 
@@ -457,9 +462,9 @@ class TeacherModeActivity : AppCompatActivity() {
                         .toList()
 
                     Log.d("Attendance", """
-                        Tekil kayıtlar:
-                        - Toplam kayıt: ${uniqueRecords.size}
+                        İşlenen kayıtlar:
                         - Bugünkü kayıt: ${todayRecords.size}
+                        - Tekil öğrenci: ${uniqueRecords.size}
                         - Tarih filtresi: ${startOfDay}
                     """.trimIndent())
 
@@ -471,10 +476,17 @@ class TeacherModeActivity : AppCompatActivity() {
                         )
                     }
                     
-                    updateDeviceList(devices)
+                    runOnUiThread {
+                        updateDeviceList(devices)
+                        binding.tvStudentCount.text = "Toplam Öğrenci: ${devices.size}"
+                        binding.tvStatus.text = "Yoklama alınıyor... (${devices.size} öğrenci)"
+                    }
                 }
             } catch (e: Exception) {
                 Log.e("Attendance", "Veritabanı okuma hatası: ${e.message}", e)
+                runOnUiThread {
+                    binding.tvStatus.text = "Yoklama listesi güncellenirken hata oluştu"
+                }
             }
         }
     }
@@ -912,10 +924,12 @@ class TeacherModeActivity : AppCompatActivity() {
 
     private fun updateStudentCount() {
         val count = deviceAdapter.getStudentCount()
+        Log.d("Attendance", "Öğrenci sayısı güncelleniyor: $count")
         binding.tvStudentCount.text = "Toplam Öğrenci: $count"
     }
 
     private fun updateDeviceList(devices: List<DeviceAdapter.BluetoothDevice>) {
+        Log.d("Attendance", "Cihaz listesi güncelleniyor: ${devices.size} cihaz")
         deviceAdapter.updateDevices(devices)
         updateStudentCount()
     }
