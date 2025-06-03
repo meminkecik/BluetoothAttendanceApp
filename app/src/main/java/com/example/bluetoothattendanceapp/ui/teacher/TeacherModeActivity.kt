@@ -27,6 +27,7 @@ import android.os.ParcelUuid
 import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
+import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -39,22 +40,28 @@ import com.example.bluetoothattendanceapp.R
 import com.example.bluetoothattendanceapp.data.local.AttendanceDatabase
 import com.example.bluetoothattendanceapp.data.local.CourseDao
 import com.example.bluetoothattendanceapp.data.model.AttendanceRecord
+import com.example.bluetoothattendanceapp.data.model.Classroom
 import com.example.bluetoothattendanceapp.data.model.Course
 import com.example.bluetoothattendanceapp.data.model.FirebaseAttendanceRecord
+import com.example.bluetoothattendanceapp.data.model.LocationPoint
 import com.example.bluetoothattendanceapp.data.remote.FirebaseManager
 import com.example.bluetoothattendanceapp.databinding.ActivityTeacherModeBinding
 import com.example.bluetoothattendanceapp.ui.auth.LoginActivity
 import com.example.bluetoothattendanceapp.ui.common.DeviceAdapter
+import com.example.bluetoothattendanceapp.utils.LocationUtils
 import com.example.bluetoothattendanceapp.utils.SessionManager
 import com.example.bluetoothattendanceapp.utils.UuidUtils
 import com.google.firebase.database.FirebaseDatabase
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import java.nio.charset.Charset
 import java.util.Calendar
 import java.util.Date
+
 
 class TeacherModeActivity : AppCompatActivity() {
 
@@ -82,6 +89,10 @@ class TeacherModeActivity : AppCompatActivity() {
     private var isAdvertising = false
 
     private lateinit var mutex: Mutex
+
+    private var selectedClassroom: Classroom? = null
+    private lateinit var classroomAdapter: ArrayAdapter<String>
+    private val classroomList = mutableListOf<Classroom>()
 
     companion object {
         private const val BLUETOOTH_CONNECT = "android.permission.BLUETOOTH_CONNECT"
@@ -210,6 +221,7 @@ class TeacherModeActivity : AppCompatActivity() {
         setupBluetooth()
         setupRecyclerView()
         setupUI()
+        setupClassroomDropdown()
 
         lifecycleScope.launch {
             try {
@@ -246,6 +258,10 @@ class TeacherModeActivity : AppCompatActivity() {
                     startAttendance()
                 }
             }
+
+            btnAddClassroom.setOnClickListener {
+                startActivity(Intent(this@TeacherModeActivity, AddClassroomActivity::class.java))
+            }
         }
 
         binding.tvStudentCount.text = "Toplam Öğrenci: 0"
@@ -273,6 +289,58 @@ class TeacherModeActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun setupClassroomDropdown() {
+        classroomAdapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, mutableListOf())
+        binding.classroomDropdown.setAdapter(classroomAdapter)
+
+        binding.classroomDropdown.setOnItemClickListener { _, _, position, _ ->
+            if (position < classroomList.size) {
+                selectedClassroom = classroomList[position]
+                Log.d("TeacherMode", "Seçilen derslik: ${selectedClassroom?.name}")
+            }
+        }
+
+        // Derslikleri yükle
+        loadClassrooms()
+    }
+    private fun loadClassrooms() {
+        lifecycleScope.launch {
+            try {
+                Log.d("TeacherMode", "Derslikler yükleniyor...")
+                val classrooms = withContext(Dispatchers.IO) {
+                    firebaseManager.getClassrooms()
+                }
+
+                Log.d("TeacherMode", "Firebase'den ${classrooms.size} derslik alındı")
+
+                classroomList.clear()
+                classroomList.addAll(classrooms)
+
+                val classroomNames = classrooms.map { it.name }
+                classroomAdapter.clear()
+                classroomAdapter.addAll(classroomNames)
+
+                Log.d("TeacherMode", "Derslikler dropdown'a eklendi: ${classroomNames.size} adet")
+
+                if (classroomNames.isEmpty()) {
+                    Toast.makeText(
+                        this@TeacherModeActivity,
+                        "Henüz derslik eklenmemiş. Lütfen 'Derslik Ekle' butonuna tıklayarak derslik ekleyin.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } catch (e: Exception) {
+                Log.e("TeacherMode", "Derslikler yüklenirken hata: ${e.message}")
+                e.printStackTrace()
+                Toast.makeText(
+                    this@TeacherModeActivity,
+                    "Derslikler yüklenirken hata oluştu: ${e.message}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
     private fun startAttendance() {
         if (!checkBluetoothPermissions()) {
             Log.e("TeacherMode", "Bluetooth izinleri eksik")
@@ -285,6 +353,15 @@ class TeacherModeActivity : AppCompatActivity() {
             return
         }
 
+        if (selectedClassroom == null) {
+            Toast.makeText(this, "Lütfen bir derslik seçin", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        startAttendanceWithClassroom(courseName)
+    }
+
+    private fun startAttendanceWithClassroom(courseName: String) {
         lifecycleScope.launch {
             try {
                 val course = Course(
@@ -621,6 +698,27 @@ class TeacherModeActivity : AppCompatActivity() {
                         return
                     }
                 }
+
+                // Öğrencinin konumunu kontrol et
+                val isInClassroom = selectedClassroom?.let { classroom ->
+                    LocationUtils.isPointInPolygon(
+                        point = LocationPoint(
+                            latitude = result.scanRecord?.manufacturerSpecificData?.get(0x0000)?.let { data ->
+                                // Burada öğrencinin konum bilgisini almalıyız
+                                // Şimdilik varsayılan bir değer döndürüyoruz
+                                0.0
+                            } ?: 0.0,
+                            longitude = 0.0
+                        ),
+                        corners = classroom.corners
+                    )
+                } ?: true // Eğer derslik seçilmemişse konum kontrolü yapma
+
+                if (!isInClassroom) {
+                    Log.d("BLEScan", "Öğrenci derslikte değil: $studentNumber")
+                    sendAttendanceStatus(result.device, false)
+                    return
+                }
                 
                 val attendanceRecord = AttendanceRecord(
                     courseId = currentCourseId,
@@ -760,6 +858,7 @@ class TeacherModeActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         updateBluetoothStatus(bluetoothAdapter.isEnabled)
+        loadClassrooms()
     }
 
     private fun setupBluetooth() {

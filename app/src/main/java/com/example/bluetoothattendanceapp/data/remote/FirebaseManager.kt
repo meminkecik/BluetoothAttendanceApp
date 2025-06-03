@@ -1,11 +1,14 @@
 package com.example.bluetoothattendanceapp.data.remote
 
 import android.content.Context
+import android.location.Location
 import android.util.Log
 import com.example.bluetoothattendanceapp.data.local.AttendanceDatabase
 import com.example.bluetoothattendanceapp.data.model.AttendanceSession
+import com.example.bluetoothattendanceapp.data.model.Classroom
 import com.example.bluetoothattendanceapp.data.model.Course
 import com.example.bluetoothattendanceapp.data.model.FirebaseAttendanceRecord
+import com.example.bluetoothattendanceapp.data.model.LocationPoint
 import com.example.bluetoothattendanceapp.data.model.User
 import com.example.bluetoothattendanceapp.data.model.UserEntity
 import com.example.bluetoothattendanceapp.data.model.UserType
@@ -14,6 +17,7 @@ import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ValueEventListener
+import com.google.android.gms.tasks.Task
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.callbackFlow
@@ -25,6 +29,7 @@ class FirebaseManager(private val context: Context? = null) {
     private val database = FirebaseDatabase.getInstance().reference
     private val usersRef = database.child("users")
     private val attendanceRef = database.child("attendance_sessions")
+    private val classroomsRef = database.child("classrooms")
     private val localDatabase by lazy { context?.let { AttendanceDatabase.getDatabase(it) } }
 
     companion object {
@@ -306,6 +311,119 @@ class FirebaseManager(private val context: Context? = null) {
                 Log.e("Firebase", "Senkronizasyon hatası: ${e.message}")
                 e.printStackTrace()
             }
+        }
+    }
+
+    suspend fun addClassroom(classroom: Classroom): Result<String> {
+        return try {
+            val classroomRef = classroomsRef.push()
+            val classroomWithId = classroom.copy(id = classroomRef.key ?: "")
+            classroomRef.setValue(classroomWithId).await()
+            Result.success(classroomRef.key ?: "")
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    fun getTeacherClassrooms(teacherId: String): Task<List<Classroom>> {
+        return database.child("classrooms")
+            .orderByChild("teacherId")
+            .equalTo(teacherId)
+            .get()
+            .continueWith { task ->
+                if (task.isSuccessful) {
+                    val result = task.result
+                    val classrooms = mutableListOf<Classroom>()
+                    
+                    result.children.forEach { child ->
+                        try {
+                            val id = child.key ?: return@forEach
+                            val name = child.child("name").getValue(String::class.java) ?: return@forEach
+                            val teacherId = child.child("teacherId").getValue(String::class.java) ?: ""
+                            val createdAt = child.child("createdAt").getValue(Long::class.java) ?: System.currentTimeMillis()
+                            
+                            val cornersList = mutableListOf<LocationPoint>()
+                            child.child("corners").children.forEach { corner ->
+                                val latitude = corner.child("latitude").getValue(Double::class.java)
+                                val longitude = corner.child("longitude").getValue(Double::class.java)
+                                if (latitude != null && longitude != null) {
+                                    cornersList.add(LocationPoint(latitude, longitude))
+                                }
+                            }
+                            
+                            classrooms.add(Classroom(
+                                id = id,
+                                name = name,
+                                teacherId = teacherId,
+                                corners = cornersList,
+                                createdAt = createdAt
+                            ))
+                        } catch (e: Exception) {
+                            Log.e("FirebaseManager", "Derslik verisi işlenirken hata: ${e.message}")
+                        }
+                    }
+                    classrooms
+                } else {
+                    Log.e("FirebaseManager", "Derslikler alınırken hata: ${task.exception?.message}")
+                    emptyList()
+                }
+            }
+    }
+
+    suspend fun getClassroomById(classroomId: String): Result<Classroom> {
+        return try {
+            val snapshot = classroomsRef.child(classroomId).get().await()
+            val classroom = snapshot.getValue(Classroom::class.java)
+            if (classroom != null) {
+                Result.success(classroom)
+            } else {
+                Result.failure(Exception("Derslik bulunamadı"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getClassrooms(): List<Classroom> {
+        return try {
+            Log.d("FirebaseManager", "Derslikler alınıyor...")
+            val snapshot = classroomsRef.get().await()
+            
+            val classrooms = mutableListOf<Classroom>()
+            snapshot.children.forEach { child ->
+                try {
+                    val id = child.key ?: return@forEach
+                    val name = child.child("name").getValue(String::class.java) ?: return@forEach
+                    val teacherId = child.child("teacherId").getValue(String::class.java) ?: ""
+                    val createdAt = child.child("createdAt").getValue(Long::class.java) ?: System.currentTimeMillis()
+                    val cornersList = child.child("corners").children.mapNotNull { cornerSnapshot ->
+                        val latitude = cornerSnapshot.child("latitude").getValue(Double::class.java)
+                        val longitude = cornerSnapshot.child("longitude").getValue(Double::class.java)
+                        if (latitude != null && longitude != null) {
+                            LocationPoint(latitude, longitude)
+                        } else null
+                    }
+
+                    val classroom = Classroom(
+                        id = id,
+                        name = name,
+                        teacherId = teacherId,
+                        corners = cornersList,
+                        createdAt = createdAt
+                    )
+                    classrooms.add(classroom)
+                    Log.d("FirebaseManager", "Derslik alındı: $name")
+                } catch (e: Exception) {
+                    Log.e("FirebaseManager", "Derslik verisi işlenirken hata: ${e.message}")
+                }
+            }
+            
+            Log.d("FirebaseManager", "Toplam ${classrooms.size} derslik alındı")
+            classrooms
+        } catch (e: Exception) {
+            Log.e("FirebaseManager", "Derslikler alınamadı: ${e.message}")
+            e.printStackTrace()
+            emptyList()
         }
     }
 } 

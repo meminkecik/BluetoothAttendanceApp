@@ -24,19 +24,27 @@ import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
 import android.widget.Toast
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.example.bluetoothattendanceapp.R
+import com.example.bluetoothattendanceapp.data.model.Classroom
 import com.example.bluetoothattendanceapp.data.model.Course
+import com.example.bluetoothattendanceapp.data.model.LocationPoint
 import com.example.bluetoothattendanceapp.data.model.User
 import com.example.bluetoothattendanceapp.data.remote.FirebaseManager
 import com.example.bluetoothattendanceapp.databinding.ActivityStudentBinding
 import com.example.bluetoothattendanceapp.ui.auth.LoginActivity
 import com.example.bluetoothattendanceapp.ui.common.CourseAdapter
+import com.example.bluetoothattendanceapp.utils.LocationUtils
 import com.example.bluetoothattendanceapp.utils.SessionManager
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.launch
 import java.nio.charset.Charset
@@ -70,6 +78,12 @@ class StudentActivity : AppCompatActivity() {
     private val attendedCourses = mutableSetOf<Int>()
     private val ATTENDANCE_PREFS = "attendance_prefs"
     private val ATTENDED_COURSES_KEY = "attended_courses"
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
+    private var selectedClassroom: Classroom? = null
+    private var isUserInfoLoaded = false
+    private val TAG = "StudentActivity"
+    private var selectedCourse: Course? = null
+    private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
 
     companion object {
         private const val BLUETOOTH_ADVERTISE = Manifest.permission.BLUETOOTH_ADVERTISE
@@ -214,15 +228,16 @@ class StudentActivity : AppCompatActivity() {
         binding = ActivityStudentBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        setupPermissionLauncher()
         btnToggleBluetooth = binding.btnToggleBluetooth
         setupUI()
         setupBluetooth()
         setupRecyclerView()
         firebaseManager = FirebaseManager(this)
         sessionManager = SessionManager(this)
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
         getCurrentUserInfo()
-
         loadAttendedCourses()
     }
 
@@ -445,27 +460,143 @@ class StudentActivity : AppCompatActivity() {
     }
 
     private fun setupRecyclerView() {
-        courseAdapter = CourseAdapter { course: Course ->
-            Log.d("StudentActivity", "Ders seçildi: ${course.name}")
-
+        courseAdapter = CourseAdapter { course ->
             if (!bluetoothAdapter.isEnabled) {
-                Toast.makeText(this, getString(R.string.turn_on_bluetooth), Toast.LENGTH_SHORT).show()
+                showBluetoothDialog()
                 return@CourseAdapter
             }
 
-            if (currentUser == null) {
-                Log.e("StudentActivity", "Kullanıcı bilgileri henüz yüklenmedi")
-                Toast.makeText(this, "Lütfen biraz bekleyin, kullanıcı bilgileri yükleniyor", Toast.LENGTH_SHORT).show()
+            if (!isUserInfoLoaded) {
+                Toast.makeText(this, "Kullanıcı bilgileri yüklenemedi", Toast.LENGTH_SHORT).show()
                 return@CourseAdapter
             }
 
-            startAdvertisingForCourse(course)
+            lifecycleScope.launch {
+                try {
+                    val teacherId = firebaseManager.getCurrentUser()?.id ?: return@launch
+                    Log.d(TAG, "Öğretmen ID: $teacherId")
+                    
+                    firebaseManager.getTeacherClassrooms(teacherId)
+                        .addOnSuccessListener { classrooms ->
+                            Log.d(TAG, "Bulunan derslik sayısı: ${classrooms.size}")
+                            
+                            if (classrooms.isNotEmpty()) {
+                                selectedClassroom = classrooms.first()
+                                Log.d(TAG, "Seçilen derslik: ${selectedClassroom?.name}")
+                                
+                                if (ActivityCompat.checkSelfPermission(
+                                        this@StudentActivity,
+                                        Manifest.permission.ACCESS_FINE_LOCATION
+                                    ) == PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    fusedLocationClient.lastLocation
+                                        .addOnSuccessListener { location ->
+                                            if (location != null) {
+                                                val locationPoint = LocationPoint(location.latitude, location.longitude)
+                                                if (selectedClassroom != null && LocationUtils.isPointInPolygon(locationPoint, selectedClassroom!!.corners)) {
+                                                    startAdvertising(course.id)
+                                                } else {
+                                                    Toast.makeText(
+                                                        this@StudentActivity,
+                                                        "Derslik içinde değilsiniz! Lütfen dersliğe girin.",
+                                                        Toast.LENGTH_LONG
+                                                    ).show()
+                                                }
+                                            } else {
+                                                Toast.makeText(
+                                                    this@StudentActivity,
+                                                    "Konum alınamadı. Lütfen konum servislerini açın.",
+                                                    Toast.LENGTH_LONG
+                                                ).show()
+                                            }
+                                        }
+                                        .addOnFailureListener { e ->
+                                            Log.e(TAG, "Konum alınamadı: ${e.message}")
+                                            Toast.makeText(
+                                                this@StudentActivity,
+                                                "Konum alınamadı: ${e.message}",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                } else {
+                                    Toast.makeText(
+                                        this@StudentActivity,
+                                        "Konum izni gerekli",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            } else {
+                                Log.d(TAG, "Derslik bulunamadı, yoklama gönderiliyor")
+                                startAdvertising(course.id)
+                            }
+                        }
+                        .addOnFailureListener { e ->
+                            Log.e(TAG, "Derslik kontrolü sırasında hata: ${e.message}")
+                            Toast.makeText(
+                                this@StudentActivity,
+                                "Derslik kontrolü sırasında hata: ${e.message}",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Derslik kontrolü sırasında hata: ${e.message}")
+                    Toast.makeText(
+                        this@StudentActivity,
+                        "Derslik kontrolü sırasında hata: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
         }
 
         binding.courseRecyclerView.apply {
             layoutManager = LinearLayoutManager(this@StudentActivity)
             adapter = courseAdapter
         }
+    }
+
+    private fun checkLocationAndStartAdvertising(course: Course) {
+        if (ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            Toast.makeText(
+                this,
+                "Konum izni gerekli",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+            .addOnSuccessListener { location ->
+                if (location != null) {
+                    val studentLocation = LocationPoint(location.latitude, location.longitude)
+                    if (selectedClassroom != null && LocationUtils.isPointInPolygon(studentLocation, selectedClassroom!!.corners)) {
+                        startAdvertisingForCourse(course)
+                    } else {
+                        Toast.makeText(
+                            this,
+                            "Derslik sınırları içinde değilsiniz. Lütfen dersliğe girin.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                } else {
+                    Toast.makeText(
+                        this,
+                        "Konum alınamadı. Lütfen GPS'in açık olduğundan emin olun.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+            .addOnFailureListener { e ->
+                Toast.makeText(
+                    this,
+                    "Konum alınamadı: ${e.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
     }
 
     private fun startAdvertisingForCourse(course: Course) {
@@ -589,7 +720,7 @@ class StudentActivity : AppCompatActivity() {
 
                 } catch (e: Exception) {
                     Log.e("BLEAdvertise_STUDENT", "Yayın başlatma hatası: ${e.message}")
-                    handleAdvertisingError(e.message ?: "Bilinmeyen hata", course)
+                    handleAdvertisingError(e.message ?: "Bilinmeyen hata")
                 }
             }, 1000)
 
@@ -890,6 +1021,7 @@ class StudentActivity : AppCompatActivity() {
                     Log.d("StudentActivity", "Kullanıcı bilgileri alındı: ${user.name} ${user.surname}")
                     updateUIWithUserInfo(user)
                     startActiveCoursesCheck()
+                    isUserInfoLoaded = true
                 } else {
                     Log.e("StudentActivity", "Kullanıcı bilgileri null")
                     Toast.makeText(this@StudentActivity, "Kullanıcı bilgileri alınamadı", Toast.LENGTH_SHORT).show()
@@ -913,14 +1045,16 @@ class StudentActivity : AppCompatActivity() {
         }
     }
 
-    private fun handleAdvertisingError(error: String, course: Course) {
+    private fun handleAdvertisingError(error: String) {
         if (advertisingRetryCount < MAX_RETRY_COUNT) {
             advertisingRetryCount++
             Log.d("BLEAdvertise", "Yayın yeniden deneniyor (${advertisingRetryCount}/${MAX_RETRY_COUNT})")
             
             advertisingHandler.postDelayed({
                 currentUser?.let { user ->
-                    startSimpleAdvertising(course, user)
+                    selectedCourse?.let { course ->
+                        startSimpleAdvertising(course, user)
+                    }
                 }
             }, 3000)
             
@@ -1026,5 +1160,187 @@ class StudentActivity : AppCompatActivity() {
             apply()
         }
         Log.d("StudentActivity", "Ders $courseId yoklamaya eklendi")
+    }
+
+    private fun showBluetoothDialog() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Bluetooth Gerekli")
+            .setMessage("Yoklama için Bluetooth'un açık olması gerekiyor. Bluetooth'u açmak ister misiniz?")
+            .setPositiveButton("Evet") { _, _ ->
+                val enableBtIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+                try {
+                    startActivity(enableBtIntent)
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Bluetooth açılamadı: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Hayır", null)
+            .show()
+    }
+
+    private fun startAdvertising(courseId: Int) {
+        if (!checkBluetoothPermissions()) {
+            Log.e("BLEAdvertise_STUDENT", "Bluetooth izinleri eksik")
+            return
+        }
+
+        try {
+            cleanupAdvertising()
+
+            if (courseId <= 0) {
+                Log.e("BLEAdvertise_STUDENT", "Geçersiz ders ID: $courseId")
+                updateAdvertisingStatus("Geçersiz ders ID")
+                return
+            }
+
+            // Konum kontrolü
+            if (ActivityCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+                    if (location == null) {
+                        Log.e("BLEAdvertise_STUDENT", "Konum alınamadı")
+                        Toast.makeText(this, "Konum alınamadı. Lütfen konum servislerini açın.", Toast.LENGTH_SHORT).show()
+                        return@addOnSuccessListener
+                    }
+
+                    val studentLocation = LocationPoint(location.latitude, location.longitude)
+                    val isInClassroom = selectedClassroom?.let { classroom ->
+                        LocationUtils.isPointInPolygon(studentLocation, classroom.corners)
+                    } ?: false
+
+                    if (!isInClassroom) {
+                        Log.d("BLEAdvertise_STUDENT", "Öğrenci derslikte değil")
+                        Toast.makeText(this, "Lütfen dersliğe girin", Toast.LENGTH_SHORT).show()
+                        return@addOnSuccessListener
+                    }
+
+                    // Konum kontrolü başarılı, yoklama gönderimini başlat
+                    startAttendanceAdvertising(courseId)
+                }
+            } else {
+                Log.e("BLEAdvertise_STUDENT", "Konum izni yok")
+                Toast.makeText(this, "Konum izni gerekli", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e("BLEAdvertise_STUDENT", "Yoklama başlatma hatası: ${e.message}")
+            updateAdvertisingStatus("Hata: ${e.message}")
+        }
+    }
+
+    private fun startAttendanceAdvertising(courseId: Int) {
+        advertisingHandler.postDelayed({
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    if (ActivityCompat.checkSelfPermission(this, BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) {
+                        Log.e("BLEAdvertise_STUDENT", "BLUETOOTH_ADVERTISE izni eksik")
+                        permissionLauncher.launch(arrayOf(BLUETOOTH_ADVERTISE))
+                        return@postDelayed
+                    }
+                }
+
+                bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
+                if (bluetoothLeAdvertiser == null) {
+                    Log.e("BLEAdvertise_STUDENT", "BLE Advertiser null")
+                    updateAdvertisingStatus("BLE yayını desteklenmiyor")
+                    return@postDelayed
+                }
+
+                val studentNumber = sessionManager.getStudentNumber() ?: run {
+                    Log.e("BLEAdvertise_STUDENT", "Öğrenci numarası bulunamadı")
+                    updateAdvertisingStatus("Öğrenci numarası bulunamadı")
+                    return@postDelayed
+                }
+
+                val attendanceData = buildString {
+                    append("STUDENT|")
+                    append(studentNumber)
+                    append("|")
+                    append(courseId)
+                }
+
+                Log.d("BLEAdvertise_STUDENT", """
+                    Yoklama verisi hazırlanıyor:
+                    - Öğrenci No: $studentNumber
+                    - Ders Adı: ${selectedCourse?.name ?: ""}
+                    - Ders ID: $courseId
+                    - Veri: $attendanceData
+                """.trimIndent())
+
+                val dataBytes = attendanceData.toByteArray(Charset.forName("UTF-8"))
+                Log.d("BLEAdvertise_STUDENT", "Yoklama verisi hazırlandı: $attendanceData (${dataBytes.size} bytes)")
+
+                val settings = AdvertiseSettings.Builder()
+                    .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                    .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+                    .setConnectable(false)
+                    .setTimeout(30000)
+                    .build()
+
+                val data = AdvertiseData.Builder()
+                    .setIncludeDeviceName(false)
+                    .addManufacturerData(MANUFACTURER_ID, dataBytes)
+                    .build()
+
+                Thread.sleep(500)
+
+                bluetoothLeAdvertiser?.startAdvertising(settings, data, object : AdvertiseCallback() {
+                    override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+                        Log.i("BLEAdvertise_STUDENT", """
+                            YOKLAMA YAYINI BAŞARIYLA BAŞLATILDI!
+                            - Tx Power Level: ${settingsInEffect.txPowerLevel}
+                            - Timeout: ${settingsInEffect.timeout}
+                            - Connectable: ${settingsInEffect.isConnectable}
+                        """.trimIndent())
+                        isAdvertising = true
+                        updateAdvertisingStatus("Yoklama gönderiliyor...")
+                    }
+
+                    override fun onStartFailure(errorCode: Int) {
+                        val errorMessage = when (errorCode) {
+                            ADVERTISE_FAILED_ALREADY_STARTED -> "Yayın zaten başlatılmış"
+                            ADVERTISE_FAILED_DATA_TOO_LARGE -> "Yayın verisi çok büyük"
+                            ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "Çok fazla yayıncı var"
+                            ADVERTISE_FAILED_INTERNAL_ERROR -> "Dahili bir hata oluştu"
+                            ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "Bu özellik desteklenmiyor"
+                            else -> "Bilinmeyen hata kodu: $errorCode"
+                        }
+                        Log.e("BLEAdvertise_STUDENT", "Yayın başlatma hatası: $errorMessage")
+                        handleAdvertisingError(errorMessage)
+                    }
+                })
+            } catch (e: Exception) {
+                Log.e("BLEAdvertise_STUDENT", "Yayın başlatma hatası: ${e.message}")
+                handleAdvertisingError(e.message ?: "Bilinmeyen hata")
+            }
+        }, 1000)
+    }
+
+    private fun setupPermissionLauncher() {
+        permissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions()
+        ) { permissions ->
+            val allGranted = permissions.entries.all { it.value }
+            if (allGranted) {
+                startAdvertising(selectedCourse?.id ?: 0)
+            } else {
+                Toast.makeText(this, "Gerekli izinler verilmedi", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun cleanupAdvertising() {
+        try {
+            if (isAdvertising && bluetoothLeAdvertiser != null) {
+                bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
+                isAdvertising = false
+                advertisingRetryCount = 0
+                Log.d("BLEAdvertise_STUDENT", "Yoklama yayını durduruldu")
+            }
+        } catch (e: Exception) {
+            Log.e("BLEAdvertise_STUDENT", "Yayın durdurma hatası: ${e.message}")
+        }
     }
 }

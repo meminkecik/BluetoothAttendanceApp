@@ -1,26 +1,50 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
     android:padding="16dp">
 
-    <TextView
-        android:id="@+id/tvStudentCount"
+    <LinearLayout
+        android:id="@+id/classroomContainer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="8dp"
-        android:gravity="end"
-        android:textColor="@android:color/black"
-        android:textSize="16sp"
-        android:textStyle="bold" />
+        android:layout_marginTop="16dp"
+        android:orientation="horizontal"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:id="@+id/classroomDropdownLayout"
+            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="8dp"
+            android:hint="Derslik Seçin">
+
+            <AutoCompleteTextView
+                android:id="@+id/classroomDropdown"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="none" />
+
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnAddClassroom"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Derslik Ekle" />
+
+    </LinearLayout>
 
     <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/courseNameLayout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="16dp"
-        android:hint="Ders Adı">
+        android:layout_marginTop="16dp"
+        android:hint="Ders Adı"
+        app:layout_constraintTop_toBottomOf="@id/classroomContainer">
 
         <com.google.android.material.textfield.TextInputEditText
             android:id="@+id/courseNameInput"
@@ -34,16 +58,10 @@
         android:id="@+id/btnToggleAttendance"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="@string/start_attendance"
-        app:icon="@drawable/ic_play"
-        app:iconGravity="end" />
-
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/rvDevices"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
         android:layout_marginTop="16dp"
-        android:layout_weight="1" />
+        android:text="Yoklama Al"
+        app:icon="@drawable/ic_play"
+        app:layout_constraintTop_toBottomOf="@id/courseNameLayout" />
 
     <TextView
         android:id="@+id/tvStatus"
@@ -51,6 +69,24 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
         android:gravity="center"
-        android:textColor="@android:color/darker_gray" />
+        android:text="Hazır"
+        app:layout_constraintTop_toBottomOf="@id/btnToggleAttendance" />
 
-</LinearLayout> 
+    <TextView
+        android:id="@+id/tvStudentCount"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center"
+        android:text="Toplam Öğrenci: 0"
+        app:layout_constraintTop_toBottomOf="@id/tvStatus" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/rvDevices"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="16dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tvStudentCount" />
+
+</androidx.constraintlayout.widget.ConstraintLayout> 

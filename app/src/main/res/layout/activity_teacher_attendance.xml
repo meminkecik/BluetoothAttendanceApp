@@ -7,24 +7,36 @@
     android:padding="16dp">
 
     <TextView
+        android:id="@+id/tvSelectedClassroom"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Seçili Derslik: Yok"
+        android:textSize="16sp"
+        android:layout_marginBottom="8dp"/>
+
+    <Button
+        android:id="@+id/btnSelectClassroom"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Derslik Seç"
+        android:layout_marginBottom="16dp"/>
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/recyclerViewCourses"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginBottom="16dp"/>
+
+    <TextView
         android:id="@+id/txtStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Yoklama başlatıldı"
+        android:text="Yoklama bekleniyor..."
         android:textSize="16sp"
-        android:gravity="center"
         android:layout_marginBottom="8dp"/>
 
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Yoklama Kayıtları"
-        android:textSize="20sp"
-        android:textStyle="bold"
-        android:gravity="center"
-        android:layout_marginBottom="16dp"/>
-
-    <HorizontalScrollView
+    <ScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">
@@ -33,19 +45,15 @@
             android:id="@+id/tableLayout"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:stretchColumns="*">
-        </TableLayout>
+            android:stretchColumns="*" />
 
-    </HorizontalScrollView>
+    </ScrollView>
 
-    <com.google.android.material.button.MaterialButton
+    <Button
         android:id="@+id/btnEndAttendance"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:layout_marginTop="16dp"
         android:text="Yoklamayı Bitir"
-        android:visibility="gone"
-        android:backgroundTint="@android:color/holo_red_dark"/>
+        android:layout_marginTop="16dp"/>
 
 </LinearLayout> 

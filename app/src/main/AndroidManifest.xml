@@ -126,5 +126,9 @@
             android:exported="false"
             android:label="Yoklama Detayları"
             android:theme="@style/Theme.BluetoothAttendanceApp.NoActionBar" />
+
+        <activity
+            android:name=".ui.teacher.AddClassroomActivity"
+            android:exported="false" />
     </application>
 </manifest>

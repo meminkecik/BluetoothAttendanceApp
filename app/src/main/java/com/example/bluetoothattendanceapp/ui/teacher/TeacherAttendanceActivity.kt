@@ -24,14 +24,21 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.LinearLayoutManager
 import com.example.bluetoothattendanceapp.R
 import com.example.bluetoothattendanceapp.data.local.AttendanceDatabase
 import com.example.bluetoothattendanceapp.data.model.AttendanceRecord
+import com.example.bluetoothattendanceapp.data.model.Classroom
 import com.example.bluetoothattendanceapp.data.model.Course
 import com.example.bluetoothattendanceapp.data.model.FirebaseAttendanceRecord
+import com.example.bluetoothattendanceapp.data.model.LocationPoint
 import com.example.bluetoothattendanceapp.data.remote.FirebaseManager
 import com.example.bluetoothattendanceapp.databinding.ActivityTeacherAttendanceBinding
+import com.example.bluetoothattendanceapp.ui.common.CourseAdapter
 import com.example.bluetoothattendanceapp.ui.common.DeviceAdapter
+import com.example.bluetoothattendanceapp.utils.LocationUtils
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
 import com.google.firebase.database.FirebaseDatabase
 import com.itextpdf.kernel.pdf.PdfWriter
 import com.opencsv.CSVWriter
@@ -72,6 +79,9 @@ class TeacherAttendanceActivity : AppCompatActivity() {
     private val processedStudents = mutableMapOf<String, ProcessingStatus>()
     private val processedSignals = mutableMapOf<String, Long>()
     private val SIGNAL_PROCESS_INTERVAL = 10000L
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
+    private var selectedClassroom: Classroom? = null
+    private lateinit var courseAdapter: CourseAdapter
 
     private data class ProcessingStatus(
         val timestamp: Long,
@@ -366,6 +376,8 @@ class TeacherAttendanceActivity : AppCompatActivity() {
         binding = ActivityTeacherAttendanceBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+
         setupUI()
         database = AttendanceDatabase.getDatabase(this)
         tableLayout = binding.tableLayout
@@ -414,6 +426,10 @@ class TeacherAttendanceActivity : AppCompatActivity() {
             }
             
             btnEndAttendance.visibility = View.GONE
+
+            btnSelectClassroom.setOnClickListener {
+                showClassroomSelectionDialog()
+            }
         }
     }
 
@@ -780,6 +796,148 @@ class TeacherAttendanceActivity : AppCompatActivity() {
         super.onResume()
         if (isAttendanceActive) {
             startAttendance()
+        }
+    }
+
+    private fun loadClassrooms() {
+        lifecycleScope.launch {
+            try {
+                val teacherId = firebaseManager.getCurrentUser()?.id ?: return@launch
+                firebaseManager.getTeacherClassrooms(teacherId)
+                    .addOnSuccessListener { classrooms ->
+                        if (classrooms.isNotEmpty()) {
+                            binding.btnSelectClassroom.visibility = View.VISIBLE
+                        }
+                    }
+                    .addOnFailureListener { e ->
+                        Log.e(TAG, "Derslikler yüklenirken hata: ${e.message}")
+                    }
+            } catch (e: Exception) {
+                Log.e(TAG, "Derslikler yüklenirken hata: ${e.message}")
+            }
+        }
+    }
+
+    private fun showClassroomSelectionDialog() {
+        lifecycleScope.launch {
+            try {
+                val teacherId = firebaseManager.getCurrentUser()?.id ?: return@launch
+                firebaseManager.getTeacherClassrooms(teacherId)
+                    .addOnSuccessListener { classrooms ->
+                        val classroomNames = classrooms.map { it.name }.toTypedArray()
+                        AlertDialog.Builder(this@TeacherAttendanceActivity)
+                            .setTitle("Derslik Seç")
+                            .setItems(classroomNames) { _, which ->
+                                selectedClassroom = classrooms[which]
+                                binding.tvSelectedClassroom.text = "Seçili Derslik: ${selectedClassroom?.name}"
+                            }
+                            .setNegativeButton("İptal", null)
+                            .show()
+                    }
+                    .addOnFailureListener { e ->
+                        Log.e(TAG, "Derslik seçim dialogu gösterilirken hata: ${e.message}")
+                    }
+            } catch (e: Exception) {
+                Log.e(TAG, "Derslik seçim dialogu gösterilirken hata: ${e.message}")
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun checkLocationForAttendance(result: ScanResult, studentNumber: String) {
+        if (selectedClassroom != null) {
+            if (ActivityCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                lifecycleScope.launch {
+                    try {
+                        val location = withContext(Dispatchers.IO) {
+                            fusedLocationClient.lastLocation.await()
+                        }
+                        
+                        location?.let {
+                            if (LocationUtils.isPointInPolygon(LocationPoint(it.latitude, it.longitude), selectedClassroom!!.corners)) {
+                                processAttendance(studentNumber, result.device?.address ?: "", courseId)
+                            } else {
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(
+                                        this@TeacherAttendanceActivity,
+                                        "Öğrenci derslik içinde değil",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Konum kontrolü sırasında hata: ${e.message}")
+                    }
+                }
+            }
+        } else {
+            processAttendance(studentNumber, result.device?.address ?: "", courseId)
+        }
+    }
+
+    private fun setupRecyclerView() {
+        courseAdapter = CourseAdapter { course ->
+            lifecycleScope.launch {
+                try {
+                    val teacherId = firebaseManager.getCurrentUser()?.id ?: return@launch
+                    firebaseManager.getTeacherClassrooms(teacherId)
+                        .addOnSuccessListener { classrooms ->
+                            if (classrooms.isNotEmpty()) {
+                                selectedClassroom = classrooms.first()
+                                startAttendanceSession(course)
+                            } else {
+                                Toast.makeText(
+                                    this@TeacherAttendanceActivity,
+                                    "Önce bir derslik seçmelisiniz",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                        .addOnFailureListener { e ->
+                            Toast.makeText(
+                                this@TeacherAttendanceActivity,
+                                "Derslik kontrolü sırasında hata: ${e.message}",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                } catch (e: Exception) {
+                    Toast.makeText(
+                        this@TeacherAttendanceActivity,
+                        "Derslik kontrolü sırasında hata: ${e.message}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+
+        binding.recyclerViewCourses.apply {
+            layoutManager = LinearLayoutManager(this@TeacherAttendanceActivity)
+            adapter = courseAdapter
+        }
+    }
+
+    private fun startAttendanceSession(course: Course) {
+        lifecycleScope.launch {
+            try {
+                courseId = course.id
+                this@TeacherAttendanceActivity.course = course
+                title = "Yoklama - ${course.name}"
+                loadAttendanceRecords()
+                startAttendance()
+                createAttendanceSession()
+            } catch (e: Exception) {
+                Log.e(TAG, "Yoklama oturumu başlatılamadı: ${e.message}")
+                Toast.makeText(
+                    this@TeacherAttendanceActivity,
+                    "Yoklama oturumu başlatılamadı: ${e.message}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
         }
     }
 } 
